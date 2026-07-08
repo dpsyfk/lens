@@ -2,8 +2,6 @@ Note
 1)**TraceFlow** aka **Lens**
 The Blueprint - **TraceFlow**
 
-<img width="1024" height="500" alt="image" src="https://github.com/user-attachments/assets/7d86a4df-0640-4c9c-a6f2-49f0dbae8fa8" />
-
 
 ### Vision
 To make the "invisible" interactions between modern software components visible to every developer, making local debugging as easy as looking at a map.
