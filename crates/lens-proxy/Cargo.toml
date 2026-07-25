@@ -10,3 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 lens-core = { path = "../lens-core" }
+tokio = { version = "1.48", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = "0.1"
