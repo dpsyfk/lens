@@ -7,3 +7,10 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+lens-core = { path = "../lens-core" }
+tokio = { version = "1.48", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.48", features = ["macros", "rt"] }
