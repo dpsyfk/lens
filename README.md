@@ -2,6 +2,24 @@ Note
 1)**TraceFlow** aka **Lens**
 The Blueprint - **TraceFlow**
 
+## Development preview
+
+The current preview runs as an explicit HTTP proxy. It accepts absolute-form
+HTTP/1 requests, supports `CONNECT` passthrough, and can also forward every
+connection to one fixed TCP target.
+
+```sh
+cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless
+curl --proxy http://127.0.0.1:8888 http://example.com/
+
+# Fixed-target TCP mode (also the future PostgreSQL routing seam)
+cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
+```
+
+`CONNECT` is tunnel-only in this preview. Certificate generation and HTTPS
+inspection arrive in the TLS milestone. Observations are bounded and may be
+dropped under load rather than slowing forwarded application traffic.
+
 
 ### Vision
 To make the "invisible" interactions between modern software components visible to every developer, making local debugging as easy as looking at a map.

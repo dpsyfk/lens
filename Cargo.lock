@@ -25,6 +25,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "http"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+dependencies = [
+ "bytes",
+ "itoa",
+]
+
+[[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -36,6 +52,7 @@ version = "0.1.0"
 dependencies = [
  "lens-core",
  "lens-proxy",
+ "lens-store",
  "tokio",
  "tracing-subscriber",
 ]
@@ -72,6 +89,7 @@ version = "0.1.0"
 name = "lens-proxy"
 version = "0.1.0"
 dependencies = [
+ "http",
  "lens-core",
  "tokio",
  "tracing",
@@ -84,6 +102,10 @@ version = "0.1.0"
 [[package]]
 name = "lens-store"
 version = "0.1.0"
+dependencies = [
+ "lens-core",
+ "tokio",
+]
 
 [[package]]
 name = "lens-tls"
@@ -244,19 +266,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
  "pin-project-lite",
- "tracing-attributes",
  "tracing-core",
-]
-
-[[package]]
-name = "tracing-attributes"
-version = "0.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]

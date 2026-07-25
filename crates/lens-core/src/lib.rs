@@ -402,6 +402,57 @@ impl fmt::Display for Endpoint {
     }
 }
 
+/// Non-blocking observation emitted by the proxy data plane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservationEvent {
+    /// Flow this event belongs to.
+    pub flow_id: FlowId,
+    /// Timestamp captured at the proxy boundary.
+    pub timestamp: TimestampPair,
+    /// Lifecycle or transfer information.
+    pub kind: ObservationKind,
+}
+
+impl ObservationEvent {
+    /// Creates an observation for a flow.
+    #[must_use]
+    pub const fn new(flow_id: FlowId, timestamp: TimestampPair, kind: ObservationKind) -> Self {
+        Self {
+            flow_id,
+            timestamp,
+            kind,
+        }
+    }
+}
+
+/// Payload carried by a proxy observation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ObservationKind {
+    /// A client flow has selected an upstream target.
+    Opened {
+        /// Client endpoint.
+        client: Endpoint,
+        /// Selected upstream endpoint.
+        upstream: Endpoint,
+        /// Protocol classification available at routing time.
+        protocol: Option<String>,
+    },
+    /// Bytes were forwarded in one direction.
+    Transferred {
+        /// Direction relative to the client.
+        direction: Direction,
+        /// Number of bytes forwarded.
+        bytes: u64,
+    },
+    /// The flow completed normally.
+    Closed,
+    /// The flow failed without terminating the proxy session.
+    Failed {
+        /// Safe operational reason suitable for diagnostics.
+        reason: String,
+    },
+}
+
 /// Aggregate flow status.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FlowState {

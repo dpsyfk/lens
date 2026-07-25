@@ -6,9 +6,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use lens_core::RunId;
 use lens_proxy::{
-    ListenerConfig, ProxyListener, ProxyMode as ProxyListenMode, ProxyRuntimeConfig, ProxyServer,
+    ListenerConfig, ObservationSink, ProxyListener, ProxyMode as ProxyListenMode,
+    ProxyRuntimeConfig, ProxyServer,
 };
+use lens_store::StoreActor;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8888";
 const DEFAULT_MODE: ProxyMode = ProxyMode::Explicit;
@@ -73,14 +76,12 @@ where
     }
 }
 
-/// Runs a fixed-upstream forwarding session until Ctrl-C.
+/// Runs an HTTP or fixed-upstream forwarding session until Ctrl-C.
 fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<String, CliError> {
     let plan = render_run_plan(config);
     if !bind_listener {
         return Ok(plan);
     }
-
-    let upstream = config.upstream_addr.ok_or(CliError::UpstreamRequired)?;
 
     let mode = match config.mode {
         ProxyMode::Explicit => ProxyListenMode::Explicit,
@@ -101,27 +102,53 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         .enable_all()
         .build()
         .map_err(|error| CliError::RuntimeFailed(error.to_string()))?;
+    let runtime_config = config
+        .upstream_addr
+        .map_or_else(ProxyRuntimeConfig::http, ProxyRuntimeConfig::new);
+    let (observer, observations) = ObservationSink::channel(1024);
+    let (store_actor, store_handle) = StoreActor::new(config.max_flows, RunId::new(1));
     let server = runtime
-        .block_on(async { ProxyServer::from_listener(listener, ProxyRuntimeConfig::new(upstream)) })
+        .block_on(async { ProxyServer::from_listener(listener, runtime_config) })
         .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
+    let server = server.with_observer(observer);
 
     println!("{plan}\nbound: {local_addr}\nstatus: forwarding; press Ctrl-C to stop");
-    let stats = runtime
-        .block_on(server.run_until(async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                eprintln!("lens: failed to wait for Ctrl-C: {error}");
-            }
-        }))
+    let (stats, snapshot) = runtime
+        .block_on(async move {
+            let store_task = tokio::spawn(store_actor.run(observations));
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            let signal_task = tokio::spawn(async move {
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    eprintln!("lens: failed to wait for Ctrl-C: {error}");
+                }
+                let _ = shutdown_tx.send(());
+            });
+            let stats = server.run_until(shutdown_rx).await?;
+            signal_task.abort();
+            store_task.await.map_err(|error| {
+                lens_core::CoreError::operation_failed("store actor", error.to_string())
+            })?;
+            Ok::<_, lens_core::CoreError>((stats, store_handle.snapshot()))
+        })
         .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
 
-    Ok(format!(
-        "lens stopped\naccepted: {}\ncompleted: {}\nfailed: {}\nbytes: client->upstream {}, upstream->client {}",
+    let mut output = format!(
+        "lens stopped\naccepted: {}\ncompleted: {}\nfailed: {}\nobservations_dropped: {}\nevicted: {}\nbytes: client->upstream {}, upstream->client {}",
         stats.accepted,
         stats.completed,
         stats.failed,
+        stats.observations_dropped,
+        snapshot.evicted,
         stats.client_to_upstream_bytes,
         stats.upstream_to_client_bytes
-    ))
+    );
+    if config.headless {
+        for flow in snapshot.flows {
+            output.push('\n');
+            output.push_str(&flow.to_json_line());
+        }
+    }
+    Ok(output)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -497,7 +524,10 @@ fn render_run_plan(config: &ResolvedConfig) -> String {
         "lens run\nmode: {}\nlisten: {}\nupstream: {}\nredaction: {}\nheadless: {}\nmax_flows: {}\nmax_body: {} bytes",
         config.mode,
         config.listen,
-        config.upstream.as_deref().unwrap_or("not configured"),
+        config
+            .upstream
+            .as_deref()
+            .unwrap_or("selected from HTTP request"),
         if config.reveal { "revealed" } else { "enabled" },
         config.headless,
         config.max_flows,
@@ -521,7 +551,10 @@ fn render_doctor_report(config: &ResolvedConfig, check: DoctorCheck) -> String {
         lines.push(format!(
             "network: ok; bind address {}; upstream {}",
             config.listen_addr,
-            config.upstream.as_deref().unwrap_or("not configured")
+            config
+                .upstream
+                .as_deref()
+                .unwrap_or("selected from HTTP request")
         ));
     }
     if matches!(check, DoctorCheck::All | DoctorCheck::Trust) {
@@ -560,7 +593,6 @@ enum CliError {
         source: String,
     },
     ConfigNotFound(PathBuf),
-    UpstreamRequired,
     BindFailed {
         addr: String,
         source: String,
@@ -599,10 +631,6 @@ impl fmt::Display for CliError {
             Self::ConfigNotFound(path) => {
                 write!(f, "lens: config file not found: {}", path.display())
             }
-            Self::UpstreamRequired => write!(
-                f,
-                "lens: --upstream <addr:port> is required for fixed-target forwarding"
-            ),
             Self::BindFailed { addr, source } => {
                 write!(f, "lens: failed to bind {addr}: {source}")
             }
@@ -626,7 +654,7 @@ COMMANDS:
 GLOBAL OPTIONS:
   --config <path>            Read simple key = value configuration
   --listen <addr:port>       Listen address [default: 127.0.0.1:8888]
-  --upstream <addr:port>     Fixed TCP forwarding target (required for run)
+  --upstream <addr:port>     Optional fixed TCP target; omit for HTTP proxy mode
   --mode <explicit|transparent>
                              How traffic reaches Lens [default: explicit]
   --reveal                   Disable redaction for this run
@@ -639,6 +667,7 @@ GLOBAL OPTIONS:
 
 EXAMPLES:
   lens
+  HTTP_PROXY=http://127.0.0.1:8888 lens run --headless
   lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
   lens doctor --check all
 ";
@@ -776,16 +805,16 @@ max_body = 64
     }
 
     #[test]
-    fn real_run_requires_a_fixed_upstream() {
-        let error = run(
+    fn run_without_fixed_upstream_selects_http_targets() {
+        let output = run(
             vec!["run", "--listen", "127.0.0.1:0", "--mode", "explicit"],
             &empty_env(),
             |_| Ok(None),
-            true,
+            false,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error, CliError::UpstreamRequired);
+        assert!(output.contains("upstream: selected from HTTP request"));
     }
 
     #[test]
