@@ -1238,6 +1238,7 @@ mod tests {
         assert!(String::from_utf8(response)
             .unwrap()
             .starts_with("HTTP/1.1 200 OK"));
+        client.shutdown().await.unwrap();
         drop(client);
         upstream_task.await.unwrap();
         shutdown.send(()).unwrap();
