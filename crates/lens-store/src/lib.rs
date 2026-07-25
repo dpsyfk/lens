@@ -1,12 +1,15 @@
 //! Bounded, single-writer in-memory flow store.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use lens_core::{
-    Direction, EventEnvelope, EventSource, FlowId, FlowRecord, FlowState, ObservationEvent,
-    ObservationKind, RunId,
+    Direction, EventEnvelope, EventSource, FlowId, FlowRecord, FlowState, MessageId, MessageRecord,
+    ObservationEvent, ObservationKind, RunId, Sensitivity,
 };
+use lens_proto_http1::Http1Decoder;
+use lens_protocol::{DecodeBatch, StreamingDecoder};
+use lens_redact::Redactor;
 use tokio::sync::mpsc;
 
 /// Flow record plus transfer counters maintained by the store.
@@ -20,6 +23,10 @@ pub struct StoredFlow {
     pub upstream_to_client_bytes: u64,
     /// Safe operational failure reason, when present.
     pub failure: Option<String>,
+    /// Recoverable decoder warning, when inspection lost framing.
+    pub decoder_error: Option<String>,
+    /// Redacted, body-capped messages decoded for this flow.
+    pub messages: Vec<MessageRecord>,
 }
 
 impl StoredFlow {
@@ -27,7 +34,7 @@ impl StoredFlow {
     #[must_use]
     pub fn to_json_line(&self) -> String {
         format!(
-            "{{\"flow_id\":{},\"client\":\"{}\",\"upstream\":\"{}\",\"protocol\":{},\"state\":\"{}\",\"client_to_upstream_bytes\":{},\"upstream_to_client_bytes\":{},\"failure\":{}}}",
+            "{{\"flow_id\":{},\"client\":\"{}\",\"upstream\":\"{}\",\"protocol\":{},\"state\":\"{}\",\"client_to_upstream_bytes\":{},\"upstream_to_client_bytes\":{},\"failure\":{},\"decoder_error\":{},\"messages\":{}}}",
             self.record
                 .envelope
                 .flow_id
@@ -39,7 +46,9 @@ impl StoredFlow {
             self.record.state,
             self.client_to_upstream_bytes,
             self.upstream_to_client_bytes,
-            json_string(self.failure.as_deref())
+            json_string(self.failure.as_deref()),
+            json_string(self.decoder_error.as_deref()),
+            messages_json(&self.messages)
         )
     }
 }
@@ -57,6 +66,7 @@ pub struct StoreSnapshot {
 struct StoreState {
     flows: VecDeque<StoredFlow>,
     evicted: u64,
+    next_message_id: u64,
 }
 
 /// Read-only handle used by UI and export consumers.
@@ -83,32 +93,75 @@ pub struct StoreActor {
     state: Arc<RwLock<StoreState>>,
     max_flows: usize,
     run_id: RunId,
+    max_body: usize,
+    reveal: bool,
+    decoders: HashMap<FlowId, Http1Decoder>,
+    redactor: Redactor,
 }
 
 impl StoreActor {
     /// Creates a bounded actor and its read-only handle.
     #[must_use]
     pub fn new(max_flows: usize, run_id: RunId) -> (Self, StoreHandle) {
+        Self::with_inspection(max_flows, run_id, 262_144, false)
+    }
+
+    /// Creates an actor with explicit body and reveal settings.
+    #[must_use]
+    pub fn with_inspection(
+        max_flows: usize,
+        run_id: RunId,
+        max_body: usize,
+        reveal: bool,
+    ) -> (Self, StoreHandle) {
         assert!(max_flows > 0, "max_flows must be positive");
+        assert!(max_body > 0, "max_body must be positive");
         let state = Arc::new(RwLock::new(StoreState::default()));
         (
             Self {
                 state: Arc::clone(&state),
                 max_flows,
                 run_id,
+                max_body,
+                reveal,
+                decoders: HashMap::new(),
+                redactor: Redactor::new(reveal),
             },
             StoreHandle { state },
         )
     }
 
     /// Consumes observations until every sender is dropped.
-    pub async fn run(self, mut receiver: mpsc::Receiver<ObservationEvent>) {
+    pub async fn run(mut self, mut receiver: mpsc::Receiver<ObservationEvent>) {
         while let Some(event) = receiver.recv().await {
             self.apply(event);
         }
     }
 
-    fn apply(&self, event: ObservationEvent) {
+    fn apply(&mut self, event: ObservationEvent) {
+        if let ObservationKind::Data { direction, bytes } = &event.kind {
+            let batch = self
+                .decoders
+                .get_mut(&event.flow_id)
+                .map(|decoder| decoder.push(*direction, bytes));
+            if let Some(batch) = batch {
+                self.store_batch(event.flow_id, event.timestamp, batch);
+            }
+            return;
+        }
+
+        if matches!(
+            &event.kind,
+            ObservationKind::Closed | ObservationKind::Failed { .. }
+        ) {
+            if let Some(mut decoder) = self.decoders.remove(&event.flow_id) {
+                let client = decoder.finish(Direction::ClientToServer);
+                self.store_batch(event.flow_id, event.timestamp, client);
+                let server = decoder.finish(Direction::ServerToClient);
+                self.store_batch(event.flow_id, event.timestamp, server);
+            }
+        }
+
         let mut state = self
             .state
             .write()
@@ -120,7 +173,13 @@ impl StoreActor {
                 protocol,
             } => {
                 if state.flows.len() == self.max_flows {
-                    state.flows.pop_front();
+                    let evicted_flow_id = state
+                        .flows
+                        .pop_front()
+                        .and_then(|flow| flow.record.envelope.flow_id);
+                    if let Some(evicted_flow_id) = evicted_flow_id {
+                        self.decoders.remove(&evicted_flow_id);
+                    }
                     state.evicted = state.evicted.saturating_add(1);
                 }
                 let envelope = EventEnvelope::new("flow.opened", self.run_id, EventSource::Proxy)
@@ -135,7 +194,18 @@ impl StoreActor {
                     client_to_upstream_bytes: 0,
                     upstream_to_client_bytes: 0,
                     failure: None,
+                    decoder_error: None,
+                    messages: Vec::new(),
                 });
+                if state
+                    .flows
+                    .back()
+                    .and_then(|flow| flow.record.protocol.as_deref())
+                    == Some("http1")
+                {
+                    self.decoders
+                        .insert(event.flow_id, Http1Decoder::new(self.max_body));
+                }
             }
             ObservationKind::Transferred { direction, bytes } => {
                 if let Some(flow) = find_flow_mut(&mut state.flows, event.flow_id) {
@@ -151,6 +221,7 @@ impl StoreActor {
                     }
                 }
             }
+            ObservationKind::Data { .. } => unreachable!("handled before locking the store"),
             ObservationKind::Closed => {
                 if let Some(flow) = find_flow_mut(&mut state.flows, event.flow_id) {
                     flow.record.state = FlowState::Closed;
@@ -161,6 +232,53 @@ impl StoreActor {
                     flow.record.state = FlowState::Failed;
                     flow.failure = Some(reason);
                 }
+            }
+        }
+    }
+
+    fn store_batch(
+        &mut self,
+        flow_id: FlowId,
+        timestamp: lens_core::TimestampPair,
+        batch: DecodeBatch,
+    ) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = batch.desynchronized {
+            if let Some(flow) = find_flow_mut(&mut state.flows, flow_id) {
+                flow.decoder_error = Some(reason);
+            }
+        }
+        for decoded in batch.messages {
+            state.next_message_id = state.next_message_id.saturating_add(1);
+            let message_id = MessageId::new(state.next_message_id);
+            let direction = decoded.direction;
+            let truncated = decoded.truncated;
+            let outcome = self.redactor.redact(decoded);
+            let sensitivity = if self.reveal {
+                Sensitivity::Secret
+            } else if outcome.redacted {
+                Sensitivity::Redacted
+            } else {
+                Sensitivity::Public
+            };
+            let envelope = EventEnvelope::new("message.decoded", self.run_id, EventSource::Decoder)
+                .with_flow_id(flow_id)
+                .with_message_id(message_id)
+                .with_direction(direction)
+                .with_timestamps(timestamp.mono_nanos, timestamp.wall_nanos)
+                .with_sensitivity(sensitivity);
+            let message = MessageRecord::new(
+                envelope,
+                outcome.message.summary(),
+                outcome.message.render(),
+            )
+            .with_truncated(truncated);
+            if let Some(flow) = find_flow_mut(&mut state.flows, flow_id) {
+                flow.record.push_message_id(message_id);
+                flow.messages.push(message);
             }
         }
     }
@@ -176,6 +294,25 @@ fn json_string(value: Option<&str>) -> String {
     value
         .map(|value| format!("\"{}\"", escape_json(value)))
         .unwrap_or_else(|| "null".to_string())
+}
+
+fn messages_json(messages: &[MessageRecord]) -> String {
+    let values = messages
+        .iter()
+        .map(|message| {
+            format!(
+                "{{\"message_id\":{},\"direction\":{},\"summary\":\"{}\",\"body\":\"{}\",\"truncated\":{},\"sensitivity\":\"{}\"}}",
+                message.envelope.message_id.unwrap_or_default().get(),
+                json_string(message.envelope.direction.map(|value| value.to_string()).as_deref()),
+                escape_json(&message.summary),
+                escape_json(&String::from_utf8_lossy(&message.body)),
+                message.truncated,
+                message.envelope.sensitivity
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
 }
 
 fn escape_json(value: &str) -> String {
@@ -270,5 +407,99 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![2, 3]);
         assert_eq!(snapshot.evicted, 1);
+    }
+
+    #[tokio::test]
+    async fn decodes_and_redacts_http_messages_before_storage() {
+        let (actor, handle) = StoreActor::with_inspection(4, RunId::new(2), 1024, false);
+        let (sender, receiver) = mpsc::channel(8);
+        let task = tokio::spawn(actor.run(receiver));
+
+        sender.send(opened(1)).await.unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(11, 21),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: b"POST /login?token=query-secret HTTP/1.1\r\nHost: example.test\r\nAuthorization: Bearer header-secret\r\nContent-Type: application/json\r\nContent-Length: 39\r\n\r\n{\"password\":\"body-secret\",\"name\":\"Ada\"}"
+                        .to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(12, 22),
+                ObservationKind::Data {
+                    direction: Direction::ServerToClient,
+                    bytes: b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(13, 23),
+                ObservationKind::Closed,
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let snapshot = handle.snapshot();
+        let flow = &snapshot.flows[0];
+        assert_eq!(flow.messages.len(), 2);
+        assert_eq!(flow.record.message_ids.len(), 2);
+        assert_eq!(flow.messages[0].envelope.sensitivity, Sensitivity::Redacted);
+        assert_eq!(flow.messages[1].envelope.sensitivity, Sensitivity::Public);
+        let exported = flow.to_json_line();
+        assert!(!exported.contains("query-secret"));
+        assert!(!exported.contains("header-secret"));
+        assert!(!exported.contains("body-secret"));
+        assert!(exported.contains("[REDACTED]"));
+        assert!(exported.contains("POST /login?token=[REDACTED] HTTP/1.1"));
+        assert!(exported.contains("HTTP/1.1 200 OK"));
+    }
+
+    #[tokio::test]
+    async fn body_limit_is_visible_and_reveal_mode_is_marked_secret() {
+        let (actor, handle) = StoreActor::with_inspection(2, RunId::new(3), 4, true);
+        let (sender, receiver) = mpsc::channel(4);
+        let task = tokio::spawn(actor.run(receiver));
+
+        sender.send(opened(1)).await.unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(11, 21),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: b"POST /?token=visible HTTP/1.1\r\nAuthorization: Bearer visible\r\nContent-Length: 8\r\n\r\nabcdefgh".to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(12, 22),
+                ObservationKind::Closed,
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let message = &handle.snapshot().flows[0].messages[0];
+        assert!(message.truncated);
+        assert_eq!(message.envelope.sensitivity, Sensitivity::Secret);
+        assert!(message.summary.contains("token=visible"));
+        let rendered = String::from_utf8_lossy(&message.body);
+        assert!(rendered.contains("Bearer visible"));
+        assert!(rendered.ends_with("abcd"));
     }
 }

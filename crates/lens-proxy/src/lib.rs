@@ -16,7 +16,7 @@ use http::Uri;
 use lens_core::{
     Clock, CoreError, Direction, Endpoint, FlowId, ObservationEvent, ObservationKind, SystemClock,
 };
-use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -466,6 +466,7 @@ async fn forward_connection(
         }
     };
 
+    let inspect = route.protocol == "http1";
     let initial_client_bytes = match route.behavior {
         RouteBehavior::Fixed => 0,
         RouteBehavior::Forward(request) => {
@@ -473,6 +474,19 @@ async fn forward_connection(
             upstream.write_all(&request).await.map_err(|error| {
                 CoreError::operation_failed("forward request", error.to_string())
             })?;
+            if inspect {
+                emit(
+                    observer,
+                    ObservationEvent::new(
+                        flow_id,
+                        clock.now(),
+                        ObservationKind::Data {
+                            direction: Direction::ClientToServer,
+                            bytes: request,
+                        },
+                    ),
+                );
+            }
             bytes
         }
         RouteBehavior::Connect(prefetched) => {
@@ -489,17 +503,22 @@ async fn forward_connection(
         }
     };
 
-    let (client_to_upstream, upstream_to_client) =
-        match copy_bidirectional(&mut client, &mut upstream).await {
-            Ok(counts) => counts,
-            Err(error) => {
-                let reason = format!("forward ({error})");
-                emit_failed(observer, flow_id, clock, &reason);
-                return Err(CoreError::operation_failed("forward", error.to_string()));
-            }
-        };
-    let _ = client.shutdown().await;
-    let _ = upstream.shutdown().await;
+    let (client_to_upstream, upstream_to_client) = match mirror_bidirectional(
+        client,
+        upstream,
+        flow_id,
+        observer.cloned(),
+        clock.clone(),
+        inspect,
+    )
+    .await
+    {
+        Ok(counts) => counts,
+        Err(error) => {
+            emit_failed(observer, flow_id, clock, &error.to_string());
+            return Err(error);
+        }
+    };
     let client_to_upstream = client_to_upstream.saturating_add(initial_client_bytes);
     counters
         .client_to_upstream_bytes
@@ -536,6 +555,100 @@ async fn forward_connection(
     );
     tracing::info!(flow_id = %flow_id, client_to_upstream, upstream_to_client, "flow closed");
     Ok(())
+}
+
+async fn mirror_bidirectional(
+    client: TcpStream,
+    upstream: TcpStream,
+    flow_id: FlowId,
+    observer: Option<ObservationSink>,
+    clock: SystemClock,
+    inspect: bool,
+) -> Result<(u64, u64), CoreError> {
+    let (client_read, client_write) = client.into_split();
+    let (upstream_read, upstream_write) = upstream.into_split();
+    let mut pumps = JoinSet::new();
+    pumps.spawn(pump(
+        client_read,
+        upstream_write,
+        Direction::ClientToServer,
+        flow_id,
+        observer.clone(),
+        clock.clone(),
+        inspect,
+    ));
+    pumps.spawn(pump(
+        upstream_read,
+        client_write,
+        Direction::ServerToClient,
+        flow_id,
+        observer,
+        clock,
+        inspect,
+    ));
+
+    let mut client_to_upstream = 0;
+    let mut upstream_to_client = 0;
+    while let Some(result) = pumps.join_next().await {
+        let (direction, transferred) = result
+            .map_err(|error| CoreError::operation_failed("forward task", error.to_string()))?;
+        let transferred = match transferred {
+            Ok(transferred) => transferred,
+            Err(error) => {
+                pumps.abort_all();
+                while pumps.join_next().await.is_some() {}
+                return Err(CoreError::operation_failed("forward", error.to_string()));
+            }
+        };
+        match direction {
+            Direction::ClientToServer => client_to_upstream = transferred,
+            Direction::ServerToClient => upstream_to_client = transferred,
+        }
+    }
+    Ok((client_to_upstream, upstream_to_client))
+}
+
+async fn pump<R, W>(
+    mut reader: R,
+    mut writer: W,
+    direction: Direction,
+    flow_id: FlowId,
+    observer: Option<ObservationSink>,
+    clock: SystemClock,
+    inspect: bool,
+) -> (Direction, io::Result<u64>)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let result = async {
+        let mut transferred = 0_u64;
+        let mut buffer = vec![0_u8; 16 * 1024];
+        loop {
+            let read = reader.read(&mut buffer).await?;
+            if read == 0 {
+                writer.shutdown().await?;
+                return Ok(transferred);
+            }
+            writer.write_all(&buffer[..read]).await?;
+            transferred = transferred.saturating_add(read as u64);
+            if inspect {
+                emit(
+                    observer.as_ref(),
+                    ObservationEvent::new(
+                        flow_id,
+                        clock.now(),
+                        ObservationKind::Data {
+                            direction,
+                            bytes: buffer[..read].to_vec(),
+                        },
+                    ),
+                );
+            }
+        }
+    }
+    .await;
+    (direction, result)
 }
 
 fn emit(observer: Option<&ObservationSink>, event: ObservationEvent) {
@@ -765,7 +878,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let (observer, receiver) = ObservationSink::channel(16);
+        let (observer, mut receiver) = ObservationSink::channel(16);
         let server = bind_server(ProxyRuntimeConfig::http()).with_observer(observer);
         let (address, shutdown, task) = run_server(server).await;
         let mut client = TcpStream::connect(address).await.unwrap();
@@ -782,9 +895,24 @@ mod tests {
         upstream_task.await.unwrap();
         shutdown.send(()).unwrap();
         let stats = task.await.unwrap().unwrap();
-        drop(receiver);
+        let mut request_observed = false;
+        let mut response_observed = false;
+        while let Some(event) = receiver.recv().await {
+            if let ObservationKind::Data { direction, bytes } = event.kind {
+                match direction {
+                    Direction::ClientToServer => {
+                        request_observed |= bytes.starts_with(b"GET /health?full=1 HTTP/1.1");
+                    }
+                    Direction::ServerToClient => {
+                        response_observed |= bytes.starts_with(b"HTTP/1.1 200 OK");
+                    }
+                }
+            }
+        }
         assert_eq!((stats.accepted, stats.completed, stats.failed), (1, 1, 0));
         assert_eq!(stats.observations_dropped, 0);
+        assert!(request_observed);
+        assert!(response_observed);
     }
 
     #[tokio::test]
