@@ -7,3 +7,15 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+directories = "6"
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+rustls-platform-verifier = "0.7"
+sha2 = "0.10"
+time = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

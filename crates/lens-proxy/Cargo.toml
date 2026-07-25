@@ -11,8 +11,12 @@ path = "src/lib.rs"
 [dependencies]
 http = "1"
 lens-core = { path = "../lens-core" }
+lens-tls = { path = "../lens-tls" }
 tokio = { version = "1.48", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-tokio = { version = "1.48", features = ["macros"] }
+rcgen = "0.14"
+tempfile = "3"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
