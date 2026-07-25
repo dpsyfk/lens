@@ -497,8 +497,8 @@ mod tests {
         let message = &handle.snapshot().flows[0].messages[0];
         assert!(message.truncated);
         assert_eq!(message.envelope.sensitivity, Sensitivity::Secret);
+        assert!(message.summary.contains("token=visible"));
         let rendered = String::from_utf8_lossy(&message.body);
-        assert!(rendered.contains("token=visible"));
         assert!(rendered.contains("Bearer visible"));
         assert!(rendered.ends_with("abcd"));
     }
