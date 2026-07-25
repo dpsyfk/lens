@@ -42,11 +42,15 @@
 //! 39. Performance harness. Tests: latency, throughput, memory, and allocation regressions.
 //! 40. Release validation and docs sync. Tests: workspace, docs, and release checklist.
 //!
-//! Milestone 1 in this commit implements the shared event envelope and identifier primitives.
-//! Milestone 2 in this commit adds the first concrete flow and message record primitives.
-//! Milestone 3 in this commit adds the session identity model and lifecycle state primitives.
+//! Milestone 1 implements the shared event envelope and identifier primitives.
+//! Milestone 2 adds the first concrete flow and message record primitives.
+//! Milestone 3 adds the session identity model and lifecycle state primitives.
+//! Milestone 4 (sprints 5–6) adds the time abstraction and core error enum.
+//! Milestone 5 (sprints 7–10) lives in `lens-cli` (CLI skeleton, config, help, doctor).
+//! Milestone 6 (sprint 11) lives in `lens-proxy` (explicit proxy bind path).
 
 use std::fmt;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Session identifier within a run.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -615,6 +619,246 @@ impl SessionRecord {
     }
 }
 
+/// Pair of monotonic and wall-clock timestamps in nanoseconds.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct TimestampPair {
+    /// Monotonic timestamp in nanoseconds.
+    pub mono_nanos: u64,
+    /// Wall-clock timestamp in nanoseconds since the Unix epoch.
+    pub wall_nanos: u64,
+}
+
+impl TimestampPair {
+    /// Creates a new timestamp pair.
+    #[must_use]
+    pub const fn new(mono_nanos: u64, wall_nanos: u64) -> Self {
+        Self {
+            mono_nanos,
+            wall_nanos,
+        }
+    }
+}
+
+impl fmt::Display for TimestampPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mono={}ns wall={}ns", self.mono_nanos, self.wall_nanos)
+    }
+}
+
+/// Clock abstraction used by capture pipelines and tests.
+pub trait Clock: Send + Sync {
+    /// Returns the current monotonic and wall-clock timestamps.
+    fn now(&self) -> TimestampPair;
+
+    /// Convenience accessor for the monotonic clock only.
+    fn mono_nanos(&self) -> u64 {
+        self.now().mono_nanos
+    }
+
+    /// Convenience accessor for the wall clock only.
+    fn wall_nanos(&self) -> u64 {
+        self.now().wall_nanos
+    }
+}
+
+/// System clock backed by `Instant` and `SystemTime`.
+#[derive(Clone, Debug)]
+pub struct SystemClock {
+    origin: Instant,
+}
+
+impl SystemClock {
+    /// Creates a system clock with a fresh monotonic origin.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clock for SystemClock {
+    fn now(&self) -> TimestampPair {
+        let mono_nanos = self.origin.elapsed().as_nanos() as u64;
+        let wall_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_nanos() as u64;
+        TimestampPair::new(mono_nanos, wall_nanos)
+    }
+}
+
+/// Fixed clock for deterministic tests and replay.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FixedClock {
+    mono_nanos: u64,
+    wall_nanos: u64,
+}
+
+impl FixedClock {
+    /// Creates a fixed clock at the given timestamps.
+    #[must_use]
+    pub const fn new(mono_nanos: u64, wall_nanos: u64) -> Self {
+        Self {
+            mono_nanos,
+            wall_nanos,
+        }
+    }
+
+    /// Advances both clocks by the same duration.
+    pub fn advance(&mut self, duration: Duration) {
+        let delta = duration.as_nanos() as u64;
+        self.mono_nanos = self.mono_nanos.saturating_add(delta);
+        self.wall_nanos = self.wall_nanos.saturating_add(delta);
+    }
+
+    /// Sets absolute timestamps.
+    pub fn set(&mut self, mono_nanos: u64, wall_nanos: u64) {
+        self.mono_nanos = mono_nanos;
+        self.wall_nanos = wall_nanos;
+    }
+}
+
+impl Clock for FixedClock {
+    fn now(&self) -> TimestampPair {
+        TimestampPair::new(self.mono_nanos, self.wall_nanos)
+    }
+}
+
+/// High-level classification for core errors.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ErrorClass {
+    /// Invalid user input or configuration.
+    User,
+    /// Recoverable operational failure (I/O, bind, etc.).
+    Operational,
+    /// Internal invariant violation.
+    Internal,
+}
+
+impl fmt::Display for ErrorClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::User => "user",
+            Self::Operational => "operational",
+            Self::Internal => "internal",
+        })
+    }
+}
+
+/// Shared error type for pure domain and cross-crate boundaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CoreError {
+    /// Invalid argument supplied by a caller or config surface.
+    InvalidArgument {
+        /// Argument name.
+        name: String,
+        /// Provided value.
+        value: String,
+        /// Expected form.
+        expected: String,
+    },
+    /// A required resource was not found.
+    NotFound {
+        /// Resource kind.
+        kind: String,
+        /// Resource identifier.
+        id: String,
+    },
+    /// An operation failed for operational reasons.
+    OperationFailed {
+        /// Short operation label.
+        operation: String,
+        /// Underlying cause text.
+        cause: String,
+    },
+    /// An internal invariant was violated.
+    Invariant {
+        /// Description of the broken invariant.
+        message: String,
+    },
+}
+
+impl CoreError {
+    /// Returns the error class for routing diagnostics.
+    #[must_use]
+    pub const fn class(&self) -> ErrorClass {
+        match self {
+            Self::InvalidArgument { .. } => ErrorClass::User,
+            Self::NotFound { .. } | Self::OperationFailed { .. } => ErrorClass::Operational,
+            Self::Invariant { .. } => ErrorClass::Internal,
+        }
+    }
+
+    /// Creates an invalid-argument error.
+    #[must_use]
+    pub fn invalid_argument(
+        name: impl Into<String>,
+        value: impl Into<String>,
+        expected: impl Into<String>,
+    ) -> Self {
+        Self::InvalidArgument {
+            name: name.into(),
+            value: value.into(),
+            expected: expected.into(),
+        }
+    }
+
+    /// Creates a not-found error.
+    #[must_use]
+    pub fn not_found(kind: impl Into<String>, id: impl Into<String>) -> Self {
+        Self::NotFound {
+            kind: kind.into(),
+            id: id.into(),
+        }
+    }
+
+    /// Creates an operation-failed error.
+    #[must_use]
+    pub fn operation_failed(operation: impl Into<String>, cause: impl Into<String>) -> Self {
+        Self::OperationFailed {
+            operation: operation.into(),
+            cause: cause.into(),
+        }
+    }
+
+    /// Creates an invariant error.
+    #[must_use]
+    pub fn invariant(message: impl Into<String>) -> Self {
+        Self::Invariant {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for CoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidArgument {
+                name,
+                value,
+                expected,
+            } => write!(
+                f,
+                "invalid argument `{name}`: got `{value}`, expected {expected}"
+            ),
+            Self::NotFound { kind, id } => write!(f, "{kind} not found: {id}"),
+            Self::OperationFailed { operation, cause } => {
+                write!(f, "{operation} failed: {cause}")
+            }
+            Self::Invariant { message } => write!(f, "invariant violated: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for CoreError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,5 +997,57 @@ mod tests {
         assert_eq!(SessionState::Closed.to_string(), "closed");
         assert_eq!(SessionState::Failed.to_string(), "failed");
         assert_eq!(session.flow_ids, vec![FlowId::new(101), FlowId::new(202)]);
+    }
+
+    #[test]
+    fn fixed_clock_is_deterministic_and_advances() {
+        let mut clock = FixedClock::new(1_000, 2_000);
+        assert_eq!(clock.now(), TimestampPair::new(1_000, 2_000));
+        assert_eq!(clock.mono_nanos(), 1_000);
+        assert_eq!(clock.wall_nanos(), 2_000);
+        assert_eq!(clock.now().to_string(), "mono=1000ns wall=2000ns");
+
+        clock.advance(Duration::from_nanos(50));
+        assert_eq!(clock.now(), TimestampPair::new(1_050, 2_050));
+
+        clock.set(9, 11);
+        assert_eq!(clock.now(), TimestampPair::new(9, 11));
+    }
+
+    #[test]
+    fn system_clock_reports_non_zero_wall_time() {
+        let clock = SystemClock::new();
+        let first = clock.now();
+        let second = clock.now();
+
+        assert!(first.wall_nanos > 0);
+        assert!(second.mono_nanos >= first.mono_nanos);
+        assert!(second.wall_nanos >= first.wall_nanos);
+    }
+
+    #[test]
+    fn core_error_display_and_class_mapping() {
+        let invalid = CoreError::invalid_argument("listen", "nope", "addr:port");
+        assert_eq!(invalid.class(), ErrorClass::User);
+        assert_eq!(
+            invalid.to_string(),
+            "invalid argument `listen`: got `nope`, expected addr:port"
+        );
+
+        let missing = CoreError::not_found("flow", "42");
+        assert_eq!(missing.class(), ErrorClass::Operational);
+        assert_eq!(missing.to_string(), "flow not found: 42");
+
+        let failed = CoreError::operation_failed("bind", "address in use");
+        assert_eq!(failed.class(), ErrorClass::Operational);
+        assert_eq!(failed.to_string(), "bind failed: address in use");
+
+        let invariant = CoreError::invariant("store closed");
+        assert_eq!(invariant.class(), ErrorClass::Internal);
+        assert_eq!(invariant.to_string(), "invariant violated: store closed");
+
+        assert_eq!(ErrorClass::User.to_string(), "user");
+        assert_eq!(ErrorClass::Operational.to_string(), "operational");
+        assert_eq!(ErrorClass::Internal.to_string(), "internal");
     }
 }
