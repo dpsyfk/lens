@@ -6,7 +6,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use lens_proxy::{ListenerConfig, ProxyListener, ProxyMode as ProxyListenMode};
+use lens_proxy::{
+    ListenerConfig, ProxyListener, ProxyMode as ProxyListenMode, ProxyRuntimeConfig, ProxyServer,
+};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8888";
 const DEFAULT_MODE: ProxyMode = ProxyMode::Explicit;
@@ -14,6 +16,7 @@ const DEFAULT_MAX_FLOWS: usize = 10_000;
 const DEFAULT_MAX_BODY: usize = 262_144;
 
 fn main() -> ExitCode {
+    let _ = tracing_subscriber::fmt().with_target(false).try_init();
     match run_from_env() {
         Ok(output) => {
             if !output.is_empty() {
@@ -70,15 +73,14 @@ where
     }
 }
 
-/// Validates the explicit proxy bind path and reports the session plan.
-///
-/// Sprint 11 verifies that the requested address can bind. It intentionally
-/// releases the listener until the accept loop and shutdown lifecycle land.
+/// Runs a fixed-upstream forwarding session until Ctrl-C.
 fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<String, CliError> {
     let plan = render_run_plan(config);
     if !bind_listener {
         return Ok(plan);
     }
+
+    let upstream = config.upstream_addr.ok_or(CliError::UpstreamRequired)?;
 
     let mode = match config.mode {
         ProxyMode::Explicit => ProxyListenMode::Explicit,
@@ -94,10 +96,31 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         addr: config.listen.clone(),
         source: error.to_string(),
     })?;
+    let local_addr = listener.local_addr();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| CliError::RuntimeFailed(error.to_string()))?;
+    let server = runtime
+        .block_on(async { ProxyServer::from_listener(listener, ProxyRuntimeConfig::new(upstream)) })
+        .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
+
+    println!("{plan}\nbound: {local_addr}\nstatus: forwarding; press Ctrl-C to stop");
+    let stats = runtime
+        .block_on(server.run_until(async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                eprintln!("lens: failed to wait for Ctrl-C: {error}");
+            }
+        }))
+        .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
 
     Ok(format!(
-        "{plan}\nbound: {}\nstatus: bind verified; accept loop not yet implemented",
-        listener.local_addr()
+        "lens stopped\naccepted: {}\ncompleted: {}\nfailed: {}\nbytes: client->upstream {}, upstream->client {}",
+        stats.accepted,
+        stats.completed,
+        stats.failed,
+        stats.client_to_upstream_bytes,
+        stats.upstream_to_client_bytes
     ))
 }
 
@@ -147,6 +170,12 @@ impl Cli {
                     flags.listen = Some(
                         args.next()
                             .ok_or_else(|| CliError::MissingValue("--listen".to_string()))?,
+                    );
+                }
+                "--upstream" => {
+                    flags.upstream = Some(
+                        args.next()
+                            .ok_or_else(|| CliError::MissingValue("--upstream".to_string()))?,
                     );
                 }
                 "--mode" => {
@@ -276,6 +305,7 @@ impl std::str::FromStr for ProxyMode {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ConfigValues {
     listen: Option<String>,
+    upstream: Option<String>,
     mode: Option<ProxyMode>,
     reveal: Option<bool>,
     max_flows: Option<usize>,
@@ -287,6 +317,7 @@ impl ConfigValues {
     fn from_env(env_vars: &BTreeMap<String, String>) -> Self {
         Self {
             listen: env_vars.get("LENS_LISTEN").cloned(),
+            upstream: env_vars.get("LENS_UPSTREAM").cloned(),
             mode: env_vars
                 .get("LENS_MODE")
                 .and_then(|value| value.parse().ok()),
@@ -310,6 +341,8 @@ impl ConfigValues {
 struct ResolvedConfig {
     listen: String,
     listen_addr: SocketAddr,
+    upstream: Option<String>,
+    upstream_addr: Option<SocketAddr>,
     mode: ProxyMode,
     reveal: bool,
     max_flows: usize,
@@ -334,10 +367,26 @@ impl ResolvedConfig {
             value: listen.clone(),
             expected: "addr:port, for example 127.0.0.1:8888".to_string(),
         })?;
+        let upstream = flags
+            .and_then(|values| values.upstream.clone())
+            .or_else(|| env_vars.and_then(|values| values.upstream.clone()))
+            .or_else(|| file.and_then(|values| values.upstream.clone()));
+        let upstream_addr = upstream
+            .as_deref()
+            .map(|value| {
+                value.parse().map_err(|_| CliError::InvalidValue {
+                    name: "--upstream".to_string(),
+                    value: value.to_string(),
+                    expected: "addr:port, for example 127.0.0.1:8080".to_string(),
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             listen,
             listen_addr,
+            upstream,
+            upstream_addr,
             mode: pick(
                 flags.and_then(|values| values.mode),
                 env_vars.and_then(|values| values.mode),
@@ -402,6 +451,7 @@ fn parse_config_file(contents: &str) -> ConfigValues {
         let value = value.trim().trim_matches('"');
         match key {
             "listen" => values.listen = Some(value.to_string()),
+            "upstream" => values.upstream = Some(value.to_string()),
             "mode" => values.mode = value.parse().ok(),
             "reveal" => values.reveal = parse_bool(value).ok(),
             "max_flows" => values.max_flows = parse_positive_usize(key, value).ok(),
@@ -444,9 +494,10 @@ fn parse_positive_usize(name: &str, value: &str) -> Result<usize, CliError> {
 
 fn render_run_plan(config: &ResolvedConfig) -> String {
     format!(
-        "lens run\nmode: {}\nlisten: {}\nredaction: {}\nheadless: {}\nmax_flows: {}\nmax_body: {} bytes",
+        "lens run\nmode: {}\nlisten: {}\nupstream: {}\nredaction: {}\nheadless: {}\nmax_flows: {}\nmax_body: {} bytes",
         config.mode,
         config.listen,
+        config.upstream.as_deref().unwrap_or("not configured"),
         if config.reveal { "revealed" } else { "enabled" },
         config.headless,
         config.max_flows,
@@ -467,7 +518,11 @@ fn render_doctor_report(config: &ResolvedConfig, check: DoctorCheck) -> String {
         ));
     }
     if matches!(check, DoctorCheck::All | DoctorCheck::Network) {
-        lines.push(format!("network: ok; bind address {}", config.listen_addr));
+        lines.push(format!(
+            "network: ok; bind address {}; upstream {}",
+            config.listen_addr,
+            config.upstream.as_deref().unwrap_or("not configured")
+        ));
     }
     if matches!(check, DoctorCheck::All | DoctorCheck::Trust) {
         lines.push(
@@ -505,10 +560,13 @@ enum CliError {
         source: String,
     },
     ConfigNotFound(PathBuf),
+    UpstreamRequired,
     BindFailed {
         addr: String,
         source: String,
     },
+    RuntimeFailed(String),
+    ProxyFailed(String),
 }
 
 impl fmt::Display for CliError {
@@ -541,9 +599,15 @@ impl fmt::Display for CliError {
             Self::ConfigNotFound(path) => {
                 write!(f, "lens: config file not found: {}", path.display())
             }
+            Self::UpstreamRequired => write!(
+                f,
+                "lens: --upstream <addr:port> is required for fixed-target forwarding"
+            ),
             Self::BindFailed { addr, source } => {
                 write!(f, "lens: failed to bind {addr}: {source}")
             }
+            Self::RuntimeFailed(source) => write!(f, "lens: failed to start runtime: {source}"),
+            Self::ProxyFailed(source) => write!(f, "lens: proxy session failed: {source}"),
         }
     }
 }
@@ -562,6 +626,7 @@ COMMANDS:
 GLOBAL OPTIONS:
   --config <path>            Read simple key = value configuration
   --listen <addr:port>       Listen address [default: 127.0.0.1:8888]
+  --upstream <addr:port>     Fixed TCP forwarding target (required for run)
   --mode <explicit|transparent>
                              How traffic reaches Lens [default: explicit]
   --reveal                   Disable redaction for this run
@@ -574,7 +639,7 @@ GLOBAL OPTIONS:
 
 EXAMPLES:
   lens
-  lens run --mode explicit --listen 127.0.0.1:8888
+  lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
   lens doctor --check all
 ";
 
@@ -609,6 +674,8 @@ mod tests {
                 "run",
                 "--listen",
                 "127.0.0.1:9999",
+                "--upstream",
+                "127.0.0.1:8080",
                 "--mode",
                 "explicit",
                 "--reveal",
@@ -636,6 +703,7 @@ max_body = 64
         .unwrap();
 
         assert!(output.contains("listen: 127.0.0.1:9999"));
+        assert!(output.contains("upstream: 127.0.0.1:8080"));
         assert!(output.contains("mode: explicit"));
         assert!(output.contains("redaction: revealed"));
         assert!(output.contains("headless: true"));
@@ -671,7 +739,7 @@ max_body = 64
 
         assert!(output.contains("USAGE:"));
         assert!(output.contains("COMMANDS:"));
-        assert!(output.contains("lens run --mode explicit --listen 127.0.0.1:8888"));
+        assert!(output.contains("lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080"));
     }
 
     #[test]
@@ -708,18 +776,16 @@ max_body = 64
     }
 
     #[test]
-    fn run_binds_explicit_listener_when_not_skipped() {
-        let output = run(
+    fn real_run_requires_a_fixed_upstream() {
+        let error = run(
             vec!["run", "--listen", "127.0.0.1:0", "--mode", "explicit"],
             &empty_env(),
             |_| Ok(None),
             true,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(output.contains("lens run"));
-        assert!(output.contains("bound: 127.0.0.1:"));
-        assert!(output.contains("status: bind verified"));
+        assert_eq!(error, CliError::UpstreamRequired);
     }
 
     #[test]
