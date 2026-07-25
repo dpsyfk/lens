@@ -444,6 +444,13 @@ pub enum ObservationKind {
         /// Number of bytes forwarded.
         bytes: u64,
     },
+    /// Mirrored bytes for control-plane decoding. Delivery is best-effort.
+    Data {
+        /// Direction relative to the client.
+        direction: Direction,
+        /// One bounded forwarding fragment.
+        bytes: Vec<u8>,
+    },
     /// The flow completed normally.
     Closed,
     /// The flow failed without terminating the proxy session.

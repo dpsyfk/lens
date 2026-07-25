@@ -6,11 +6,16 @@ The Blueprint - **TraceFlow**
 
 The current preview runs as an explicit HTTP proxy. It accepts absolute-form
 HTTP/1 requests, supports `CONNECT` passthrough, and can also forward every
-connection to one fixed TCP target.
+connection to one fixed TCP target. HTTP/1 requests and responses are decoded
+incrementally, including fragmented, fixed-length, chunked, close-delimited,
+keep-alive, and pipelined messages.
 
 ```sh
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless
 curl --proxy http://127.0.0.1:8888 http://example.com/
+
+# Keep at most 64 KiB of each body; secrets remain redacted in JSONL output.
+cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless --max-body 65536
 
 # Fixed-target TCP mode (also the future PostgreSQL routing seam)
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
@@ -18,7 +23,10 @@ cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
 
 `CONNECT` is tunnel-only in this preview. Certificate generation and HTTPS
 inspection arrive in the TLS milestone. Observations are bounded and may be
-dropped under load rather than slowing forwarded application traffic.
+dropped under load rather than slowing forwarded application traffic. Stored
+HTTP records mask authorization, cookies, common secret headers, sensitive
+query/form fields, and JSON secret values by default. `--reveal` is an explicit
+local opt-in and marks captured message records as secret.
 
 
 ### Vision

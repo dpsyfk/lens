@@ -106,7 +106,12 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         .upstream_addr
         .map_or_else(ProxyRuntimeConfig::http, ProxyRuntimeConfig::new);
     let (observer, observations) = ObservationSink::channel(1024);
-    let (store_actor, store_handle) = StoreActor::new(config.max_flows, RunId::new(1));
+    let (store_actor, store_handle) = StoreActor::with_inspection(
+        config.max_flows,
+        RunId::new(1),
+        config.max_body,
+        config.reveal,
+    );
     let server = runtime
         .block_on(async { ProxyServer::from_listener(listener, runtime_config) })
         .map_err(|error| CliError::ProxyFailed(error.to_string()))?;

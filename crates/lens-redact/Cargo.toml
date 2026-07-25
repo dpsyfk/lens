@@ -7,3 +7,7 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+lens-protocol = { path = "../lens-protocol" }
+regex = "1"
