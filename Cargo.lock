@@ -115,6 +115,7 @@ dependencies = [
 name = "lens-redact"
 version = "0.1.0"
 dependencies = [
+ "lens-core",
  "lens-protocol",
  "regex",
 ]

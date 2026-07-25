@@ -11,3 +11,6 @@ path = "src/lib.rs"
 [dependencies]
 lens-protocol = { path = "../lens-protocol" }
 regex = "1"
+
+[dev-dependencies]
+lens-core = { path = "../lens-core" }
