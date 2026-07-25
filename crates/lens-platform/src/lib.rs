@@ -455,16 +455,18 @@ mod tests {
     #[test]
     fn macos_commands_target_the_login_keychain() {
         let store = UserTrustStore::new(PlatformKind::MacOs, "/Users/dev");
+        let expected_keychain = store.login_keychain().to_string_lossy().into_owned();
         let command = args(store.install_command(Path::new("/tmp/ca.pem")).unwrap());
         assert!(command.contains(&"trustRoot".to_string()));
-        assert!(command.contains(&"/Users/dev/Library/Keychains/login.keychain-db".to_string()));
+        assert!(command.contains(&expected_keychain));
     }
 
     #[test]
     fn linux_commands_target_the_user_nss_database() {
         let store = UserTrustStore::new(PlatformKind::Linux, "/home/dev");
+        let expected_database = format!("sql:{}", store.nss_database().display());
         let command = args(store.install_command(Path::new("/tmp/ca.pem")).unwrap());
-        assert!(command.contains(&"sql:/home/dev/.pki/nssdb".to_string()));
+        assert!(command.contains(&expected_database));
         assert!(command.contains(&"C,,".to_string()));
     }
 

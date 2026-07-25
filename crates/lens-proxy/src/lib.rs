@@ -662,12 +662,14 @@ async fn forward_connection(
                     client,
                     upstream,
                     prefetched,
-                    &upstream_endpoint,
-                    config.tls.as_ref().expect("TLS state checked above"),
-                    config.connect_timeout,
-                    flow_id,
-                    observer.cloned(),
-                    clock.clone(),
+                    InterceptContext {
+                        endpoint: &upstream_endpoint,
+                        tls: config.tls.as_ref().expect("TLS state checked above"),
+                        handshake_timeout: config.connect_timeout,
+                        flow_id,
+                        observer: observer.cloned(),
+                        clock: clock.clone(),
+                    },
                 )
                 .await
             }
@@ -719,17 +721,29 @@ async fn forward_connection(
     Ok(())
 }
 
-async fn intercept_connect(
-    mut client: TcpStream,
-    upstream: TcpStream,
-    prefetched: Vec<u8>,
-    endpoint: &Endpoint,
-    tls: &TlsInterception,
+struct InterceptContext<'a> {
+    endpoint: &'a Endpoint,
+    tls: &'a TlsInterception,
     handshake_timeout: Duration,
     flow_id: FlowId,
     observer: Option<ObservationSink>,
     clock: SystemClock,
+}
+
+async fn intercept_connect(
+    mut client: TcpStream,
+    upstream: TcpStream,
+    prefetched: Vec<u8>,
+    context: InterceptContext<'_>,
 ) -> Result<(u64, u64), CoreError> {
+    let InterceptContext {
+        endpoint,
+        tls,
+        handshake_timeout,
+        flow_id,
+        observer,
+        clock,
+    } = context;
     let server_config = tls
         .authority
         .server_config(&endpoint.host)
@@ -1411,6 +1425,7 @@ mod tests {
         assert!(String::from_utf8(response)
             .unwrap()
             .starts_with("HTTP/1.1 200 OK"));
+        drop(client);
 
         upstream_task.await.unwrap();
         shutdown.send(()).unwrap();
