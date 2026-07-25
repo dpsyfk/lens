@@ -8,3 +8,7 @@ license = "Apache-2.0"
 [[bin]]
 name = "lens"
 path = "src/main.rs"
+
+[dependencies]
+lens-core = { path = "../lens-core" }
+lens-proxy = { path = "../lens-proxy" }
