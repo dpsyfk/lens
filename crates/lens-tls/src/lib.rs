@@ -313,11 +313,12 @@ impl CertificateAuthority {
 }
 
 /// Builds an upstream client configuration that uses normal platform trust.
-pub fn platform_client_config() -> Arc<ClientConfig> {
+pub fn platform_client_config() -> Result<Arc<ClientConfig>, TlsError> {
     ensure_crypto_provider();
-    let mut config = ClientConfig::with_platform_verifier();
+    let mut config = ClientConfig::with_platform_verifier()
+        .map_err(|error| TlsError::source("configure platform TLS verifier", error))?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Arc::new(config)
+    Ok(Arc::new(config))
 }
 
 fn ensure_crypto_provider() {
@@ -339,7 +340,7 @@ fn load_material(paths: &CaPaths) -> Result<LoadedMaterial, TlsError> {
         .map_err(|error| TlsError::source("parse CA private key", error))?;
     let certificate_der = first_certificate(&certificate_pem)?;
     let parsed = parse_ca_certificate(certificate_der.as_ref())?;
-    if parsed.subject_public_key_info != key.public_key_der().as_slice() {
+    if parsed.subject_public_key_info != key.subject_public_key_info().as_slice() {
         return Err(TlsError::new(
             "load local CA",
             "certificate does not match the stored private key",
@@ -360,11 +361,12 @@ fn load_material(paths: &CaPaths) -> Result<LoadedMaterial, TlsError> {
 
 fn first_certificate(pem: &str) -> Result<CertificateDer<'static>, TlsError> {
     let mut reader = BufReader::new(pem.as_bytes());
-    rustls_pemfile::certs(&mut reader)
+    let certificate = rustls_pemfile::certs(&mut reader)
         .next()
         .transpose()
         .map_err(|error| TlsError::source("decode CA certificate PEM", error))?
-        .ok_or_else(|| TlsError::new("decode CA certificate PEM", "no certificate was found"))
+        .ok_or_else(|| TlsError::new("decode CA certificate PEM", "no certificate was found"))?;
+    Ok(certificate)
 }
 
 fn create_material(paths: &CaPaths) -> Result<(), TlsError> {

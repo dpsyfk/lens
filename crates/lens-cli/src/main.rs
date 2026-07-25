@@ -117,8 +117,9 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
                     CertificateAuthority::load_or_create(paths)
                         .map_err(|error| CliError::Certificate(error.to_string()))?,
                 );
-                ProxyRuntimeConfig::http()
-                    .with_tls_interception(TlsInterception::with_platform_verifier(authority))
+                let interception = TlsInterception::with_platform_verifier(authority)
+                    .map_err(|error| CliError::Certificate(error.to_string()))?;
+                ProxyRuntimeConfig::http().with_tls_interception(interception)
             }
             mode => ProxyRuntimeConfig::http().with_https_mode(mode),
         },

@@ -187,12 +187,13 @@ impl fmt::Debug for TlsInterception {
 
 impl TlsInterception {
     /// Uses normal platform trust for upstream HTTPS servers.
-    #[must_use]
-    pub fn with_platform_verifier(authority: Arc<CertificateAuthority>) -> Self {
-        Self {
+    pub fn with_platform_verifier(
+        authority: Arc<CertificateAuthority>,
+    ) -> Result<Self, lens_tls::TlsError> {
+        Ok(Self {
             authority,
-            upstream: platform_client_config(),
-        }
+            upstream: platform_client_config()?,
+        })
     }
 
     /// Uses an explicit upstream verifier, primarily for isolated integration tests.
