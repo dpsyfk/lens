@@ -877,11 +877,16 @@ where
         let mut transferred = 0_u64;
         let mut buffer = vec![0_u8; 16 * 1024];
         loop {
-            let read = reader.read(&mut buffer).await?;
+            let read = match reader.read(&mut buffer).await {
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => 0,
+                Err(error) => return Err(error),
+            };
             if read == 0 {
                 // The peer may already have closed its write side after all bytes were
-                // delivered. Half-close is best effort at EOF and must not turn a
-                // successfully transferred flow into a failure.
+                // delivered. TLS peers also commonly close without a close_notify,
+                // which rustls reports as UnexpectedEof. Half-close is best effort
+                // and must not turn a successfully transferred flow into a failure.
                 let _ = writer.shutdown().await;
                 return Ok(transferred);
             }
