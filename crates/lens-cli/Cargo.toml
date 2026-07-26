@@ -15,5 +15,9 @@ lens-platform = { path = "../lens-platform" }
 lens-proxy = { path = "../lens-proxy" }
 lens-store = { path = "../lens-store" }
 lens-tls = { path = "../lens-tls" }
+lens-tui = { path = "../lens-tui" }
 tokio = { version = "1.48", features = ["rt-multi-thread", "signal"] }
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+[dev-dependencies]
+tempfile = "3"

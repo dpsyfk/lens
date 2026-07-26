@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use lens_core::{Endpoint, RunId};
 use lens_platform::{PlatformKind, TrustState, UserTrustStore};
@@ -13,17 +15,18 @@ use lens_proxy::{
     HttpsMode, ListenerConfig, ObservationSink, ProxyListener, ProxyMode as ProxyListenMode,
     ProxyRuntimeConfig, ProxyServer, TlsInterception,
 };
-use lens_store::StoreActor;
+use lens_store::{StoreActor, StoreSnapshot};
 use lens_tls::{CaPaths, CaStatus, CertificateAuthority};
+use lens_tui::TuiConfig;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8888";
 const DEFAULT_MODE: ProxyMode = ProxyMode::Explicit;
 const DEFAULT_MAX_FLOWS: usize = 10_000;
 const DEFAULT_MAX_BODY: usize = 262_144;
 const DEFAULT_HTTPS_MODE: HttpsMode = HttpsMode::Intercept;
+const DEFAULT_REFRESH_MS: usize = 250;
 
 fn main() -> ExitCode {
-    let _ = tracing_subscriber::fmt().with_target(false).try_init();
     match run_from_env() {
         Ok(output) => {
             if !output.is_empty() {
@@ -62,6 +65,9 @@ where
     if matches!(parsed.command, Command::Version) {
         return Ok(format!("lens {}", env!("CARGO_PKG_VERSION")));
     }
+    if matches!(parsed.command, Command::Quickstart) {
+        return Ok(render_quickstart());
+    }
 
     let file_values = match &parsed.config_path {
         Some(path) => Some(parse_config_file(
@@ -77,7 +83,9 @@ where
         Command::Run => run_proxy_session(&config, bind_listener),
         Command::Doctor { check } => Ok(render_doctor_report(&config, check)),
         Command::Cert { action } => run_cert_command(action, bind_listener),
-        Command::Help | Command::Version => unreachable!("handled before configuration"),
+        Command::Help | Command::Version | Command::Quickstart => {
+            unreachable!("handled before configuration")
+        }
     }
 }
 
@@ -86,6 +94,11 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
     let plan = render_run_plan(config);
     if !bind_listener {
         return Ok(plan);
+    }
+
+    let interactive = !config.headless && lens_tui::stdout_is_terminal();
+    if !interactive {
+        let _ = tracing_subscriber::fmt().with_target(false).try_init();
     }
 
     let mode = match config.mode {
@@ -145,30 +158,67 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
     let server = runtime
         .block_on(async { ProxyServer::from_listener(listener, runtime_config) })
         .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
-    let server = server.with_observer(observer);
+    let server = server.with_observer(observer.clone());
 
-    println!("{plan}\nbound: {local_addr}\nstatus: forwarding; press Ctrl-C to stop");
-    let (stats, snapshot) = runtime
-        .block_on(async move {
-            let store_task = tokio::spawn(store_actor.run(observations));
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            let signal_task = tokio::spawn(async move {
-                if let Err(error) = tokio::signal::ctrl_c().await {
-                    eprintln!("lens: failed to wait for Ctrl-C: {error}");
-                }
-                let _ = shutdown_tx.send(());
-            });
-            let stats = server.run_until(shutdown_rx).await?;
-            signal_task.abort();
-            store_task.await.map_err(|error| {
-                lens_core::CoreError::operation_failed("store actor", error.to_string())
-            })?;
-            Ok::<_, lens_core::CoreError>((stats, store_handle.snapshot()))
-        })
-        .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
+    let (stats, snapshot) = if interactive {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server_task = runtime.spawn(server.run_until(shutdown_rx));
+        let store_task = runtime.spawn(store_actor.run(observations));
+        let tui_result = lens_tui::run(
+            &store_handle,
+            TuiConfig::new(
+                Duration::from_millis(config.refresh_ms as u64),
+                config.reveal,
+            ),
+            || observer.dropped(),
+        );
+        let _ = shutdown_tx.send(());
+        drop(observer);
+        let session = runtime
+            .block_on(async move {
+                let stats = server_task.await.map_err(|error| {
+                    lens_core::CoreError::operation_failed("proxy task", error.to_string())
+                })??;
+                store_task.await.map_err(|error| {
+                    lens_core::CoreError::operation_failed("store actor", error.to_string())
+                })?;
+                Ok::<_, lens_core::CoreError>((stats, store_handle.snapshot()))
+            })
+            .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
+        tui_result.map_err(|error| CliError::Terminal(error.to_string()))?;
+        session
+    } else {
+        println!("{plan}\nbound: {local_addr}\nstatus: forwarding; press Ctrl-C to stop");
+        drop(observer);
+        runtime
+            .block_on(async move {
+                let store_task = tokio::spawn(store_actor.run(observations));
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+                let signal_task = tokio::spawn(async move {
+                    if let Err(error) = tokio::signal::ctrl_c().await {
+                        eprintln!("lens: failed to wait for Ctrl-C: {error}");
+                    }
+                    let _ = shutdown_tx.send(());
+                });
+                let stats = server.run_until(shutdown_rx).await?;
+                signal_task.abort();
+                store_task.await.map_err(|error| {
+                    lens_core::CoreError::operation_failed("store actor", error.to_string())
+                })?;
+                Ok::<_, lens_core::CoreError>((stats, store_handle.snapshot()))
+            })
+            .map_err(|error| CliError::ProxyFailed(error.to_string()))?
+    };
+
+    let export = config
+        .export
+        .as_deref()
+        .map(|path| write_snapshot(path, config.export_format, &snapshot))
+        .transpose()?;
 
     let mut output = format!(
-        "lens stopped\naccepted: {}\ncompleted: {}\nfailed: {}\nobservations_dropped: {}\nevicted: {}\nbytes: client->upstream {}, upstream->client {}",
+        "lens stopped\nbound: {}\naccepted: {}\ncompleted: {}\nfailed: {}\nobservations_dropped: {}\nevicted: {}\nbytes: client->upstream {}, upstream->client {}",
+        local_addr,
         stats.accepted,
         stats.completed,
         stats.failed,
@@ -177,13 +227,46 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         stats.client_to_upstream_bytes,
         stats.upstream_to_client_bytes
     );
-    if config.headless {
+    if let Some(path) = export {
+        output.push_str(&format!(
+            "\nexport: {} ({})",
+            path.display(),
+            config.export_format
+        ));
+    }
+    if !interactive {
         for flow in snapshot.flows {
             output.push('\n');
             output.push_str(&flow.to_json_line());
         }
     }
     Ok(output)
+}
+
+fn write_snapshot(
+    path: &Path,
+    format: ExportFormat,
+    snapshot: &StoreSnapshot,
+) -> Result<PathBuf, CliError> {
+    let contents = match format {
+        ExportFormat::Json => snapshot.to_json(),
+        ExportFormat::Jsonl => snapshot.to_jsonl(),
+    };
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| CliError::Export {
+            path: path.to_path_buf(),
+            source: error.to_string(),
+        })?;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .map_err(|error| CliError::Export {
+            path: path.to_path_buf(),
+            source: error.to_string(),
+        })?;
+    Ok(path.to_path_buf())
 }
 
 fn run_cert_command(action: CertAction, execute: bool) -> Result<String, CliError> {
@@ -310,6 +393,7 @@ impl Cli {
                         .parse()?;
                     set_command(&mut command, Command::Cert { action })?;
                 }
+                "quickstart" => set_command(&mut command, Command::Quickstart)?,
                 "--check" => {
                     let value = args
                         .next()
@@ -357,6 +441,25 @@ impl Cli {
                 "--reveal" => flags.reveal = Some(true),
                 "--redact" => flags.reveal = Some(false),
                 "--headless" => flags.headless = Some(true),
+                "--refresh-ms" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("--refresh-ms".to_string()))?;
+                    flags.refresh_ms = Some(parse_positive_usize("--refresh-ms", &value)?);
+                }
+                "--export" => {
+                    flags.export = Some(
+                        args.next()
+                            .ok_or_else(|| CliError::MissingValue("--export".to_string()))?,
+                    );
+                }
+                "--export-format" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("--export-format".to_string()))?;
+                    flags.export_format = Some(value.parse()?);
+                }
+                "--allow-secret-export" => flags.allow_secret_export = Some(true),
                 "--max-flows" => {
                     let value = args
                         .next()
@@ -410,8 +513,41 @@ enum Command {
     Run,
     Doctor { check: DoctorCheck },
     Cert { action: CertAction },
+    Quickstart,
     Help,
     Version,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+enum ExportFormat {
+    Json,
+    #[default]
+    Jsonl,
+}
+
+impl fmt::Display for ExportFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Json => "json",
+            Self::Jsonl => "jsonl",
+        })
+    }
+}
+
+impl std::str::FromStr for ExportFormat {
+    type Err = CliError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "json" => Ok(Self::Json),
+            "jsonl" => Ok(Self::Jsonl),
+            _ => Err(CliError::InvalidValue {
+                name: "--export-format".to_string(),
+                value: value.to_string(),
+                expected: "json or jsonl".to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -552,6 +688,10 @@ struct ConfigValues {
     max_flows: Option<usize>,
     max_body: Option<usize>,
     headless: Option<bool>,
+    refresh_ms: Option<usize>,
+    export: Option<String>,
+    export_format: Option<ExportFormat>,
+    allow_secret_export: Option<bool>,
 }
 
 impl ConfigValues {
@@ -580,6 +720,16 @@ impl ConfigValues {
             headless: env_vars
                 .get("LENS_HEADLESS")
                 .and_then(|value| parse_bool(value).ok()),
+            refresh_ms: env_vars
+                .get("LENS_REFRESH_MS")
+                .and_then(|value| parse_positive_usize("LENS_REFRESH_MS", value).ok()),
+            export: env_vars.get("LENS_EXPORT").cloned(),
+            export_format: env_vars
+                .get("LENS_EXPORT_FORMAT")
+                .and_then(|value| value.parse().ok()),
+            allow_secret_export: env_vars
+                .get("LENS_ALLOW_SECRET_EXPORT")
+                .and_then(|value| parse_bool(value).ok()),
         }
     }
 }
@@ -597,6 +747,9 @@ struct ResolvedConfig {
     max_flows: usize,
     max_body: usize,
     headless: bool,
+    refresh_ms: usize,
+    export: Option<PathBuf>,
+    export_format: ExportFormat,
 }
 
 impl ResolvedConfig {
@@ -647,6 +800,32 @@ impl ResolvedConfig {
             }
             _ => {}
         }
+        let reveal = pick(
+            flags.and_then(|values| values.reveal),
+            env_vars.and_then(|values| values.reveal),
+            file.and_then(|values| values.reveal),
+            false,
+        );
+        let export = flags
+            .and_then(|values| values.export.clone())
+            .or_else(|| env_vars.and_then(|values| values.export.clone()))
+            .or_else(|| file.and_then(|values| values.export.clone()))
+            .map(PathBuf::from);
+        let allow_secret_export = pick(
+            flags.and_then(|values| values.allow_secret_export),
+            env_vars.and_then(|values| values.allow_secret_export),
+            file.and_then(|values| values.allow_secret_export),
+            false,
+        );
+        if reveal && export.is_some() && !allow_secret_export {
+            return Err(CliError::InvalidValue {
+                name: "--export".to_string(),
+                value: export
+                    .as_deref()
+                    .map_or_else(String::new, |path| path.display().to_string()),
+                expected: "--allow-secret-export when --reveal is active".to_string(),
+            });
+        }
 
         Ok(Self {
             listen,
@@ -666,12 +845,7 @@ impl ResolvedConfig {
                 file.and_then(|values| values.https_mode),
                 DEFAULT_HTTPS_MODE,
             ),
-            reveal: pick(
-                flags.and_then(|values| values.reveal),
-                env_vars.and_then(|values| values.reveal),
-                file.and_then(|values| values.reveal),
-                false,
-            ),
+            reveal,
             max_flows: pick(
                 flags.and_then(|values| values.max_flows),
                 env_vars.and_then(|values| values.max_flows),
@@ -689,6 +863,20 @@ impl ResolvedConfig {
                 env_vars.and_then(|values| values.headless),
                 file.and_then(|values| values.headless),
                 false,
+            ),
+            refresh_ms: pick(
+                flags.and_then(|values| values.refresh_ms),
+                env_vars.and_then(|values| values.refresh_ms),
+                file.and_then(|values| values.refresh_ms),
+                DEFAULT_REFRESH_MS,
+            )
+            .clamp(50, 2_000),
+            export,
+            export_format: pick(
+                flags.and_then(|values| values.export_format),
+                env_vars.and_then(|values| values.export_format),
+                file.and_then(|values| values.export_format),
+                ExportFormat::default(),
             ),
         })
     }
@@ -732,6 +920,10 @@ fn parse_config_file(contents: &str) -> ConfigValues {
             "max_flows" => values.max_flows = parse_positive_usize(key, value).ok(),
             "max_body" => values.max_body = parse_positive_usize(key, value).ok(),
             "headless" => values.headless = parse_bool(value).ok(),
+            "refresh_ms" => values.refresh_ms = parse_positive_usize(key, value).ok(),
+            "export" => values.export = Some(value.to_string()),
+            "export_format" => values.export_format = value.parse().ok(),
+            "allow_secret_export" => values.allow_secret_export = parse_bool(value).ok(),
             _ => {}
         }
     }
@@ -804,7 +996,7 @@ fn parse_positive_usize(name: &str, value: &str) -> Result<usize, CliError> {
 
 fn render_run_plan(config: &ResolvedConfig) -> String {
     format!(
-        "lens run\nmode: {}\nprotocol: {}\nlisten: {}\nupstream: {}\nhttps: {}\nredaction: {}\nheadless: {}\nmax_flows: {}\nmax_body: {} bytes",
+        "lens run\nmode: {}\nprotocol: {}\nlisten: {}\nupstream: {}\nhttps: {}\nredaction: {}\nheadless: {}\nrefresh: {} ms\nexport: {} ({})\nmax_flows: {}\nmax_body: {} bytes",
         config.mode,
         config.protocol,
         config.listen,
@@ -815,9 +1007,29 @@ fn render_run_plan(config: &ResolvedConfig) -> String {
         config.https_mode,
         if config.reveal { "revealed" } else { "enabled" },
         config.headless,
+        config.refresh_ms,
+        config
+            .export
+            .as_deref()
+            .map_or("disabled".to_string(), |path| path.display().to_string()),
+        config.export_format,
         config.max_flows,
         config.max_body
     )
+}
+
+fn render_quickstart() -> String {
+    "lens quickstart\n\
+1. Check readiness:        lens doctor --check all\n\
+2. Trust HTTPS inspection: lens cert install\n\
+3. Start the live TUI:     lens run --listen 127.0.0.1:8888\n\
+4. Point HTTP clients at:  HTTP_PROXY=http://127.0.0.1:8888\n\
+                           HTTPS_PROXY=http://127.0.0.1:8888\n\
+5. PostgreSQL locally:     lens run --protocol postgres --listen 127.0.0.1:15432 --upstream 127.0.0.1:5432\n\
+6. Safe diagnostic file:   lens run --headless --export lens-flows.jsonl\n\n\
+TUI controls: j/k select, p protocol, s status, l latency, / search, x clear, q quit.\n\
+Redaction is always on unless --reveal is explicit. Secret exports additionally require --allow-secret-export."
+        .to_string()
 }
 
 fn render_doctor_report(config: &ResolvedConfig, check: DoctorCheck) -> String {
@@ -906,6 +1118,11 @@ enum CliError {
     ProxyFailed(String),
     Certificate(String),
     Trust(String),
+    Terminal(String),
+    Export {
+        path: PathBuf,
+        source: String,
+    },
 }
 
 impl fmt::Display for CliError {
@@ -945,6 +1162,14 @@ impl fmt::Display for CliError {
             Self::ProxyFailed(source) => write!(f, "lens: proxy session failed: {source}"),
             Self::Certificate(source) => write!(f, "lens: certificate operation failed: {source}"),
             Self::Trust(source) => write!(f, "lens: trust-store operation failed: {source}"),
+            Self::Terminal(source) => write!(f, "lens: terminal UI failed: {source}"),
+            Self::Export { path, source } => {
+                write!(
+                    f,
+                    "lens: failed to safely export {}: {source}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -960,6 +1185,7 @@ COMMANDS:
   run        Start a live capture session (default)
   doctor     Check config, platform, trust, and network readiness
   cert       Manage the explicit local CA: install, uninstall, or status
+  quickstart Show the first-run HTTP, HTTPS, PostgreSQL, and export path
 
 GLOBAL OPTIONS:
   --config <path>            Read simple key = value configuration
@@ -974,6 +1200,11 @@ GLOBAL OPTIONS:
   --reveal                   Disable redaction for this run
   --redact                   Force redaction on
   --headless                 Run without the TUI
+  --refresh-ms <n>           TUI refresh interval, clamped to 50-2000 [default: 250]
+  --export <path>            Safely create a snapshot file when Lens stops
+  --export-format <json|jsonl>
+                             Snapshot format [default: jsonl]
+  --allow-secret-export      Required with both --reveal and --export
   --max-flows <n>            Maximum retained flows [default: 10000]
   --max-body <bytes>         Per-message body cap [default: 262144]
   --help                     Print help
@@ -983,6 +1214,7 @@ EXAMPLES:
   lens
   lens cert install
   lens cert status
+  lens quickstart
   HTTP_PROXY=http://127.0.0.1:8888 lens run --headless
   lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
   lens run --protocol postgres --listen 127.0.0.1:15432 --upstream db.example.com:5432 --headless
@@ -992,6 +1224,7 @@ EXAMPLES:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn empty_env() -> BTreeMap<String, String> {
         BTreeMap::new()
@@ -1090,7 +1323,23 @@ max_body = 64
 
         assert!(output.contains("USAGE:"));
         assert!(output.contains("COMMANDS:"));
+        assert!(output.contains("quickstart"));
         assert!(output.contains("lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn quickstart_does_not_require_configuration() {
+        let output = run(
+            vec!["quickstart", "--config", "missing.conf"],
+            &empty_env(),
+            |_| Err(CliError::ConfigNotFound(PathBuf::from("missing.conf"))),
+            false,
+        )
+        .unwrap();
+
+        assert!(output.contains("lens doctor --check all"));
+        assert!(output.contains("lens cert install"));
+        assert!(output.contains("TUI controls:"));
     }
 
     #[test]
@@ -1187,6 +1436,47 @@ max_body = 64
                 expected: "--upstream host:port for fixed-target protocols".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn refresh_is_bounded_and_secret_export_needs_two_opt_ins() {
+        let output = run(
+            vec!["run", "--refresh-ms", "1"],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap();
+        assert!(output.contains("refresh: 50 ms"));
+
+        let error = run(
+            vec!["run", "--reveal", "--export", "flows.jsonl"],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CliError::InvalidValue {
+                name: "--export".to_string(),
+                value: "flows.jsonl".to_string(),
+                expected: "--allow-secret-export when --reveal is active".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_export_refuses_to_overwrite() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("flows.json");
+        write_snapshot(&path, ExportFormat::Json, &StoreSnapshot::default()).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "{\"evicted\":0,\"flows\":[]}\n");
+
+        let error =
+            write_snapshot(&path, ExportFormat::Json, &StoreSnapshot::default()).unwrap_err();
+        assert!(matches!(error, CliError::Export { .. }));
     }
 
     #[test]

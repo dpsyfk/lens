@@ -11,6 +11,21 @@ requests and responses are decoded
 incrementally, including fragmented, fixed-length, chunked, close-delimited,
 keep-alive, and pipelined messages.
 
+Start with the guided setup, then launch the live TUI:
+
+```sh
+cargo run -p lens-cli -- quickstart
+cargo run -p lens-cli -- doctor --check all
+cargo run -p lens-cli -- run --listen 127.0.0.1:8888
+```
+
+The TUI follows new flows and shows a route list plus message inspector. Use `j`/`k`
+to select, `p` to filter protocol, `s` to filter lifecycle state, `l` to filter
+latency, `/` to search, `PageUp`/`PageDown` to scroll the inspector, `x` to clear
+filters, and `q` to stop cleanly. Refreshes are capped between 50 ms and two
+seconds; the default is 250 ms. A non-interactive stdout automatically uses
+headless output.
+
 ```sh
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless
 curl --proxy http://127.0.0.1:8888 http://example.com/
@@ -22,6 +37,9 @@ cargo run -p lens-cli -- cert status
 
 # Keep at most 64 KiB of each body; secrets remain redacted in JSONL output.
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless --max-body 65536
+
+# Create a redacted diagnostic snapshot at shutdown; existing files are never overwritten.
+cargo run -p lens-cli -- run --headless --export lens-flows.jsonl
 
 # Fixed-target TCP mode
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
@@ -41,6 +59,10 @@ forwarded application traffic. Stored HTTP records mask authorization, cookies,
 common secret headers, sensitive query/form fields, and JSON secret values by
 default. `--reveal` is an explicit local opt-in and marks captured message
 records as secret.
+Snapshot export supports `--export-format json` and `--export-format jsonl`.
+Exports use create-new semantics and refuse to replace an existing file. Combining
+`--reveal` with `--export` is rejected unless `--allow-secret-export` is also
+supplied, making persistence of revealed values a separate explicit decision.
 
 PostgreSQL mode incrementally reports startup and SSL negotiation, authentication-safe
 metadata, simple and extended query boundaries, row metadata, errors, and query latency.
