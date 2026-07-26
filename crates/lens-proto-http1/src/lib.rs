@@ -550,4 +550,33 @@ mod tests {
         assert!(finished.messages[0].truncated);
         assert!(finished.desynchronized.is_some());
     }
+
+    #[test]
+    fn malformed_corpus_is_safe_at_every_fragment_boundary() {
+        const CORPUS: &[&[u8]] = &[
+            b"",
+            b"\0\xff\x7f",
+            b"GET / HTTP/1.1\r\nBroken\r\n\r\n",
+            b"POST / HTTP/1.1\r\nContent-Length: nope\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n",
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 99\r\n\r\n",
+        ];
+
+        for sample in CORPUS {
+            for split in 0..=sample.len() {
+                let mut decoder = Http1Decoder::new(64);
+                let _ = decoder.push(Direction::ClientToServer, &sample[..split]);
+                let _ = decoder.push(Direction::ClientToServer, &sample[split..]);
+                let _ = decoder.finish(Direction::ClientToServer);
+                let _ = decoder.finish(Direction::ServerToClient);
+            }
+        }
+
+        let mut decoder = Http1Decoder::new(64);
+        let oversized_head = vec![b'a'; MAX_HEAD_BYTES + 1];
+        assert!(decoder
+            .push(Direction::ClientToServer, &oversized_head)
+            .desynchronized
+            .is_some());
+    }
 }

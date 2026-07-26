@@ -1,10 +1,39 @@
-name: Integration
+name: Hardening
 
 on:
+  pull_request:
+    paths:
+      - "crates/lens-proxy/**"
+      - "crates/lens-store/**"
+      - ".github/workflows/integration.yml"
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 2 * * 6"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  placeholder:
+  load-and-resource-limits:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo "Integration placeholder"
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Forwarding survives saturated observation
+        run: cargo test -p lens-proxy tests::bounded_observation_stays_off_the_data_plane_under_load -- --exact
+      - name: Failed flows remain isolated
+        run: cargo test -p lens-proxy tests::failed_flow_does_not_terminate_the_accept_loop -- --exact
+      - name: Upstream failures remain isolated
+        run: cargo test -p lens-proxy tests::upstream_failure_does_not_terminate_the_accept_loop -- --exact
+      - name: Shutdown remains bounded
+        run: cargo test -p lens-proxy tests::shutdown_aborts_connections_after_the_grace_period -- --exact
+      - name: Retained flows remain bounded
+        run: cargo test -p lens-store tests::retention_remains_bounded_during_a_large_flow_burst -- --exact
+      - name: Decoder faults remain flow-local
+        run: cargo test -p lens-store tests::decoder_failure_is_contained_to_one_flow -- --exact
+      - name: TLS trust failures remain flow-local
+        run: cargo test -p lens-proxy tests::https_interception_requires_explicit_client_trust -- --exact

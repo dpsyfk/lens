@@ -438,10 +438,7 @@ impl ProxyServer {
                 }
             }
             match timeout(Duration::from_millis(50), self.listener.accept()).await {
-                Ok(accepted) => {
-                    let (client, peer) = accepted.map_err(|error| {
-                        CoreError::operation_failed("accept", error.to_string())
-                    })?;
+                Ok(Ok((client, peer))) => {
                     let flow_id =
                         FlowId::new(counters.accepted.fetch_add(1, Ordering::Relaxed) + 1);
                     let config = self.config.clone();
@@ -462,6 +459,13 @@ impl ProxyServer {
                             tracing::warn!(flow_id = %flow_id, peer = %peer, error = %error, "connection forwarding failed");
                         }
                     });
+                }
+                Ok(Err(error)) => {
+                    // A transient descriptor or network error must not terminate every
+                    // healthy flow already owned by this process. Back off briefly so a
+                    // persistent OS error also cannot create a busy loop.
+                    tracing::warn!(error = %error, "connection accept failed; retrying");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Err(_) => continue,
             }
@@ -1546,6 +1550,170 @@ mod tests {
         drop(client);
         shutdown.send(()).unwrap();
         assert_eq!(task.await.unwrap().unwrap().failed, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_flow_does_not_terminate_the_accept_loop() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            let request = String::from_utf8(read_head(&mut stream).await).unwrap();
+            assert!(request.starts_with("GET /healthy HTTP/1.1"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+
+        let (address, shutdown, task) = run_server(bind_server(ProxyRuntimeConfig::http())).await;
+        let mut malformed = TcpStream::connect(address).await.unwrap();
+        malformed.write_all(b"not HTTP\r\n\r\n").await.unwrap();
+        assert!(String::from_utf8(read_head(&mut malformed).await)
+            .unwrap()
+            .starts_with("HTTP/1.1 400"));
+        drop(malformed);
+
+        let mut healthy = TcpStream::connect(address).await.unwrap();
+        healthy
+            .write_all(
+                format!(
+                    "GET http://{upstream_addr}/healthy HTTP/1.1\r\nHost: {upstream_addr}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        healthy.read_to_end(&mut response).await.unwrap();
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        healthy.shutdown().await.unwrap();
+        drop(healthy);
+
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!((stats.accepted, stats.completed, stats.failed), (2, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn upstream_failure_does_not_terminate_the_accept_loop() {
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable_addr = unavailable.local_addr().unwrap();
+        drop(unavailable);
+
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            let _ = read_head(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let (address, shutdown, task) = run_server(bind_server(ProxyRuntimeConfig::http())).await;
+        let mut failed = TcpStream::connect(address).await.unwrap();
+        failed
+            .write_all(
+                format!(
+                    "GET http://{unavailable_addr}/ HTTP/1.1\r\nHost: {unavailable_addr}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        assert!(String::from_utf8(read_head(&mut failed).await)
+            .unwrap()
+            .starts_with("HTTP/1.1 502"));
+        drop(failed);
+
+        let mut healthy = TcpStream::connect(address).await.unwrap();
+        healthy
+            .write_all(
+                format!(
+                    "GET http://{upstream_addr}/ HTTP/1.1\r\nHost: {upstream_addr}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        healthy.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 204"));
+        healthy.shutdown().await.unwrap();
+        drop(healthy);
+
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!((stats.accepted, stats.completed, stats.failed), (2, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn bounded_observation_stays_off_the_data_plane_under_load() {
+        const CONNECTIONS: usize = 32;
+        const PAYLOAD_BYTES: usize = 32 * 1024;
+
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            for _ in 0..CONNECTIONS {
+                let (mut stream, _) = upstream_listener.accept().await.unwrap();
+                connections.spawn(async move {
+                    let mut payload = Vec::new();
+                    stream.read_to_end(&mut payload).await.unwrap();
+                    stream.write_all(&payload).await.unwrap();
+                    payload.len()
+                });
+            }
+            let mut received = 0;
+            while let Some(result) = connections.join_next().await {
+                received += result.unwrap();
+            }
+            received
+        });
+
+        let (observer, _observations) = ObservationSink::channel(1);
+        let server = bind_server(ProxyRuntimeConfig::new(upstream_addr)).with_observer(observer);
+        let (address, shutdown, task) = run_server(server).await;
+        let mut clients = JoinSet::new();
+        for id in 0..CONNECTIONS {
+            clients.spawn(async move {
+                let payload = vec![id as u8; PAYLOAD_BYTES];
+                let mut stream = TcpStream::connect(address).await.unwrap();
+                stream.write_all(&payload).await.unwrap();
+                stream.shutdown().await.unwrap();
+                let mut echoed = Vec::new();
+                stream.read_to_end(&mut echoed).await.unwrap();
+                assert_eq!(echoed, payload);
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(result) = clients.join_next().await {
+                result.unwrap();
+            }
+        })
+        .await
+        .expect("load test exceeded its deadline");
+
+        assert_eq!(upstream_task.await.unwrap(), CONNECTIONS * PAYLOAD_BYTES);
+        shutdown.send(()).unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(stats.accepted, CONNECTIONS as u64);
+        assert_eq!(stats.completed, CONNECTIONS as u64);
+        assert_eq!(stats.failed, 0);
+        assert!(stats.observations_dropped > 0);
+        assert_eq!(
+            stats.client_to_upstream_bytes,
+            (CONNECTIONS * PAYLOAD_BYTES) as u64
+        );
+        assert_eq!(
+            stats.upstream_to_client_bytes,
+            (CONNECTIONS * PAYLOAD_BYTES) as u64
+        );
     }
 
     #[test]

@@ -2,5 +2,4 @@
 title = "Lens"
 authors = ["Codex"]
 language = "en"
-multilingual = false
 src = "src"

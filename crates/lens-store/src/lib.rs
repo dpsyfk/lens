@@ -514,6 +514,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_remains_bounded_during_a_large_flow_burst() {
+        const CAPACITY: usize = 128;
+        const TOTAL: u64 = 4_096;
+        let (actor, handle) = StoreActor::new(CAPACITY, RunId::new(1));
+        let (sender, receiver) = mpsc::channel(64);
+        let task = tokio::spawn(actor.run(receiver));
+
+        for flow_id in 1..=TOTAL {
+            sender.send(opened(flow_id)).await.unwrap();
+        }
+        drop(sender);
+        task.await.unwrap();
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.flows.len(), CAPACITY);
+        assert_eq!(snapshot.evicted, TOTAL - CAPACITY as u64);
+        assert_eq!(
+            snapshot.flows.first().unwrap().record.envelope.flow_id,
+            Some(FlowId::new(TOTAL - CAPACITY as u64 + 1))
+        );
+        assert_eq!(
+            snapshot.flows.last().unwrap().record.envelope.flow_id,
+            Some(FlowId::new(TOTAL))
+        );
+    }
+
+    #[tokio::test]
+    async fn decoder_failure_is_contained_to_one_flow() {
+        let (actor, handle) = StoreActor::with_inspection(4, RunId::new(5), 1024, false);
+        let (sender, receiver) = mpsc::channel(8);
+        let task = tokio::spawn(actor.run(receiver));
+
+        sender.send(opened(1)).await.unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(11, 21),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: b"GET / HTTP/1.1\r\ninvalid-header\r\n\r\n".to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        sender.send(opened(2)).await.unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(2),
+                TimestampPair::new(12, 22),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: b"GET /healthy HTTP/1.1\r\nHost: local\r\n\r\n".to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let snapshot = handle.snapshot();
+        assert!(snapshot.flows[0].decoder_error.is_some());
+        assert!(snapshot.flows[0].messages.is_empty());
+        assert_eq!(snapshot.flows[1].messages.len(), 1);
+        assert_eq!(
+            snapshot.flows[1].messages[0].summary,
+            "GET /healthy HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
     async fn decodes_and_redacts_http_messages_before_storage() {
         let (actor, handle) = StoreActor::with_inspection(4, RunId::new(2), 1024, false);
         let (sender, receiver) = mpsc::channel(8);

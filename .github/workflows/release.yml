@@ -1,10 +1,226 @@
 name: Release
 
 on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "docs/INSTALL.md"
+      - "docs/UPGRADING.md"
+      - "scripts/package-release.py"
+      - "scripts/verify-release.py"
+      - "scripts/check-versions.py"
+      - ".github/workflows/release.yml"
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  placeholder:
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: lens
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: lens
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: lens
+            archive: zip
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: lens.exe
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
-      - run: echo "Release placeholder"
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Enable Intel binary smoke tests on Apple silicon
+        if: runner.os == 'macOS' && matrix.target == 'x86_64-apple-darwin'
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+          crate_version="$(python scripts/check-versions.py)"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" != "$crate_version" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match lens-cli version $crate_version"
+              exit 1
+            fi
+          else
+            version="${crate_version}-dev.${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build locked release binary
+        run: cargo build --locked --release -p lens-cli --target ${{ matrix.target }}
+      - name: Require Windows Authenticode credentials for a tagged release
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "Tagged releases require WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD"
+          }
+      - name: Authenticode-sign Windows binary
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP "lens-signing.pfx"
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signTool) { throw "signtool.exe was not found" }
+          $binary = "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          & $signTool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:WINDOWS_CERTIFICATE_PASSWORD $binary
+          if ($LASTEXITCODE -ne 0) { throw "signtool sign failed" }
+          & $signTool.FullName verify /pa /v $binary
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed" }
+      - name: Require Apple signing and notarization credentials for a tagged release
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          for variable in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [[ -z "${!variable}" ]]; then
+              echo "::error::tagged releases require $variable"
+              exit 1
+            fi
+          done
+      - name: Developer ID-sign macOS binary
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          certificate="$RUNNER_TEMP/lens-signing.p12"
+          keychain="$RUNNER_TEMP/lens-signing.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p lens-ci "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p lens-ci "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k lens-ci "$keychain"
+          security list-keychains -d user -s "$keychain"
+          binary="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$binary"
+          codesign --verify --strict --verbose=2 "$binary"
+      - name: Smoke-test binary
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          "$binary" --version
+          "$binary" quickstart | grep -F "lens doctor"
+          "$binary" doctor --check config | grep -F "doctor"
+      - name: Package deterministic archive
+        shell: bash
+        run: |
+          python scripts/package-release.py \
+            --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
+            --target "${{ matrix.target }}" \
+            --version "${{ steps.metadata.outputs.version }}" \
+            --format "${{ matrix.archive }}" \
+            --output dist
+          python scripts/verify-release.py dist/*
+      - name: Notarize macOS archive
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool submit dist/*.zip \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lens-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  reproducible-linux-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the same revision twice
+        shell: bash
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          CARGO_TARGET_DIR=target/repro-a cargo build --locked --release -p lens-cli
+          CARGO_TARGET_DIR=target/repro-b cargo build --locked --release -p lens-cli
+          cmp target/repro-a/release/lens target/repro-b/release/lens
+          sha256sum target/repro-a/release/lens target/repro-b/release/lens
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, reproducible-linux-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: sigstore/cosign-installer@v4
+      - name: Checksum and keyless-sign every archive
+        shell: bash
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          for artifact in lens-* SHA256SUMS; do
+            cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
+            cosign verify-blob \
+              --bundle "${artifact}.sigstore.json" \
+              --certificate-identity "https://github.com/$GITHUB_WORKFLOW_REF" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "$artifact"
+          done
+      - uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

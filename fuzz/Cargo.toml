@@ -1,0 +1,29 @@
+[package]
+name = "lens-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+lens-core = { path = "../crates/lens-core" }
+lens-protocol = { path = "../crates/lens-protocol" }
+lens-proto-http1 = { path = "../crates/lens-proto-http1" }
+lens-proto-postgres = { path = "../crates/lens-proto-postgres" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "http1"
+path = "fuzz_targets/http1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres"
+path = "fuzz_targets/postgres.rs"
+test = false
+doc = false
+bench = false
