@@ -8,6 +8,7 @@ use lens_core::{
     ObservationEvent, ObservationKind, RunId, Sensitivity,
 };
 use lens_proto_http1::Http1Decoder;
+use lens_proto_postgres::PostgresDecoder;
 use lens_protocol::{DecodeBatch, StreamingDecoder};
 use lens_redact::Redactor;
 use tokio::sync::mpsc;
@@ -69,6 +70,28 @@ struct StoreState {
     next_message_id: u64,
 }
 
+#[derive(Debug)]
+enum ProtocolDecoder {
+    Http1(Box<Http1Decoder>),
+    Postgres(Box<PostgresDecoder>),
+}
+
+impl ProtocolDecoder {
+    fn push(&mut self, direction: Direction, bytes: &[u8]) -> DecodeBatch {
+        match self {
+            Self::Http1(decoder) => decoder.push(direction, bytes),
+            Self::Postgres(decoder) => decoder.push(direction, bytes),
+        }
+    }
+
+    fn finish(&mut self, direction: Direction) -> DecodeBatch {
+        match self {
+            Self::Http1(decoder) => decoder.finish(direction),
+            Self::Postgres(decoder) => decoder.finish(direction),
+        }
+    }
+}
+
 /// Read-only handle used by UI and export consumers.
 #[derive(Clone, Debug)]
 pub struct StoreHandle {
@@ -95,7 +118,8 @@ pub struct StoreActor {
     run_id: RunId,
     max_body: usize,
     reveal: bool,
-    decoders: HashMap<FlowId, Http1Decoder>,
+    decoders: HashMap<FlowId, ProtocolDecoder>,
+    pending_requests: HashMap<FlowId, VecDeque<u64>>,
     redactor: Redactor,
 }
 
@@ -125,6 +149,7 @@ impl StoreActor {
                 max_body,
                 reveal,
                 decoders: HashMap::new(),
+                pending_requests: HashMap::new(),
                 redactor: Redactor::new(reveal),
             },
             StoreHandle { state },
@@ -160,6 +185,7 @@ impl StoreActor {
                 let server = decoder.finish(Direction::ServerToClient);
                 self.store_batch(event.flow_id, event.timestamp, server);
             }
+            self.pending_requests.remove(&event.flow_id);
         }
 
         let mut state = self
@@ -179,6 +205,7 @@ impl StoreActor {
                         .and_then(|flow| flow.record.envelope.flow_id);
                     if let Some(evicted_flow_id) = evicted_flow_id {
                         self.decoders.remove(&evicted_flow_id);
+                        self.pending_requests.remove(&evicted_flow_id);
                     }
                     state.evicted = state.evicted.saturating_add(1);
                 }
@@ -197,14 +224,26 @@ impl StoreActor {
                     decoder_error: None,
                     messages: Vec::new(),
                 });
-                if state
+                match state
                     .flows
                     .back()
                     .and_then(|flow| flow.record.protocol.as_deref())
-                    == Some("http1")
                 {
-                    self.decoders
-                        .insert(event.flow_id, Http1Decoder::new(self.max_body));
+                    Some("http1") => {
+                        self.decoders.insert(
+                            event.flow_id,
+                            ProtocolDecoder::Http1(Box::new(Http1Decoder::new(self.max_body))),
+                        );
+                    }
+                    Some("postgres") => {
+                        self.decoders.insert(
+                            event.flow_id,
+                            ProtocolDecoder::Postgres(Box::new(PostgresDecoder::new(
+                                self.max_body,
+                            ))),
+                        );
+                    }
+                    _ => {}
                 }
             }
             ObservationKind::Transferred { direction, bytes } => {
@@ -252,6 +291,26 @@ impl StoreActor {
             }
         }
         for decoded in batch.messages {
+            let boundary = decoded
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("lens-boundary"))
+                .map(|(_, value)| value.as_str());
+            let latency_nanos = match boundary {
+                Some("request") => {
+                    self.pending_requests
+                        .entry(flow_id)
+                        .or_default()
+                        .push_back(timestamp.mono_nanos);
+                    None
+                }
+                Some("response") => self
+                    .pending_requests
+                    .get_mut(&flow_id)
+                    .and_then(VecDeque::pop_front)
+                    .map(|started| timestamp.mono_nanos.saturating_sub(started)),
+                _ => None,
+            };
             state.next_message_id = state.next_message_id.saturating_add(1);
             let message_id = MessageId::new(state.next_message_id);
             let direction = decoded.direction;
@@ -275,7 +334,8 @@ impl StoreActor {
                 outcome.message.summary(),
                 outcome.message.render(),
             )
-            .with_truncated(truncated);
+            .with_truncated(truncated)
+            .with_latency_nanos(latency_nanos);
             if let Some(flow) = find_flow_mut(&mut state.flows, flow_id) {
                 flow.record.push_message_id(message_id);
                 flow.messages.push(message);
@@ -301,12 +361,13 @@ fn messages_json(messages: &[MessageRecord]) -> String {
         .iter()
         .map(|message| {
             format!(
-                "{{\"message_id\":{},\"direction\":{},\"summary\":\"{}\",\"body\":\"{}\",\"truncated\":{},\"sensitivity\":\"{}\"}}",
+                "{{\"message_id\":{},\"direction\":{},\"summary\":\"{}\",\"body\":\"{}\",\"truncated\":{},\"latency_nanos\":{},\"sensitivity\":\"{}\"}}",
                 message.envelope.message_id.unwrap_or_default().get(),
                 json_string(message.envelope.direction.map(|value| value.to_string()).as_deref()),
                 escape_json(&message.summary),
                 escape_json(&String::from_utf8_lossy(&message.body)),
                 message.truncated,
+                message.latency_nanos.map_or_else(|| "null".to_string(), |value| value.to_string()),
                 message.envelope.sensitivity
             )
         })
@@ -339,15 +400,34 @@ mod tests {
     use lens_core::{Endpoint, TimestampPair};
 
     fn opened(flow_id: u64) -> ObservationEvent {
+        opened_with_protocol(flow_id, "http1", 80)
+    }
+
+    fn opened_with_protocol(flow_id: u64, protocol: &str, port: u16) -> ObservationEvent {
         ObservationEvent::new(
             FlowId::new(flow_id),
             TimestampPair::new(flow_id * 10, flow_id * 20),
             ObservationKind::Opened {
                 client: Endpoint::new("127.0.0.1", 5000 + flow_id as u16),
-                upstream: Endpoint::new("example.test", 80),
-                protocol: Some("http1".to_string()),
+                upstream: Endpoint::new("example.test", port),
+                protocol: Some(protocol.to_string()),
             },
         )
+    }
+
+    fn postgres_startup() -> Vec<u8> {
+        let mut payload = 196_608_u32.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"user\0alice\0database\0app\0\0");
+        let mut frame = ((payload.len() + 4) as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    fn postgres_message(tag: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![tag];
+        frame.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
     }
 
     #[tokio::test]
@@ -501,5 +581,74 @@ mod tests {
         let rendered = String::from_utf8_lossy(&message.body);
         assert!(rendered.contains("Bearer visible"));
         assert!(rendered.ends_with("abcd"));
+    }
+
+    #[tokio::test]
+    async fn postgres_queries_are_redacted_and_paired_with_latency() {
+        let (actor, handle) = StoreActor::with_inspection(2, RunId::new(4), 1024, false);
+        let (sender, receiver) = mpsc::channel(8);
+        let task = tokio::spawn(actor.run(receiver));
+
+        sender
+            .send(opened_with_protocol(1, "postgres", 5432))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(100, 200),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: postgres_startup(),
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(110, 210),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: postgres_message(
+                        b'Q',
+                        b"SELECT * FROM users WHERE token = 'secret' AND id = 42\0",
+                    ),
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(175, 275),
+                ObservationKind::Data {
+                    direction: Direction::ServerToClient,
+                    bytes: postgres_message(b'C', b"SELECT 1\0"),
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(180, 280),
+                ObservationKind::Closed,
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let snapshot = handle.snapshot();
+        let flow = &snapshot.flows[0];
+        assert_eq!(flow.record.protocol.as_deref(), Some("postgres"));
+        assert_eq!(flow.messages.len(), 3);
+        assert_eq!(flow.messages[1].envelope.sensitivity, Sensitivity::Redacted);
+        assert_eq!(flow.messages[2].latency_nanos, Some(65));
+        let exported = flow.to_json_line();
+        assert!(!exported.contains("secret"));
+        assert!(exported.contains("token = '?' AND id = ?"));
+        assert!(exported.contains("\"latency_nanos\":65"));
     }
 }

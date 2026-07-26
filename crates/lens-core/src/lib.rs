@@ -543,6 +543,8 @@ pub struct MessageRecord {
     pub body: Vec<u8>,
     /// Whether the payload was truncated.
     pub truncated: bool,
+    /// Request-to-terminal-response latency when the protocol exposes a boundary.
+    pub latency_nanos: Option<u64>,
 }
 
 impl MessageRecord {
@@ -558,6 +560,7 @@ impl MessageRecord {
             summary: summary.into(),
             body: body.into(),
             truncated: false,
+            latency_nanos: None,
         }
     }
 
@@ -565,6 +568,13 @@ impl MessageRecord {
     #[must_use]
     pub fn with_truncated(mut self, truncated: bool) -> Self {
         self.truncated = truncated;
+        self
+    }
+
+    /// Attaches a protocol-level request/response latency.
+    #[must_use]
+    pub const fn with_latency_nanos(mut self, latency_nanos: Option<u64>) -> Self {
+        self.latency_nanos = latency_nanos;
         self
     }
 }
@@ -1023,6 +1033,7 @@ mod tests {
         assert_eq!(message.summary, "GET /health");
         assert_eq!(message.body, b"hello");
         assert!(message.truncated);
+        assert_eq!(message.latency_nanos, None);
     }
 
     #[test]

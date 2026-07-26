@@ -4,7 +4,7 @@ The Blueprint - **TraceFlow**
 
 ## Development preview
 
-The current preview runs as an explicit HTTP proxy. It accepts absolute-form
+The current preview runs as an explicit HTTP/HTTPS or PostgreSQL proxy. It accepts absolute-form
 HTTP/1 requests, intercepts HTTPS `CONNECT` after an explicit local-CA trust
 step, and can also forward every connection to one fixed TCP target. HTTP/1
 requests and responses are decoded
@@ -23,8 +23,13 @@ cargo run -p lens-cli -- cert status
 # Keep at most 64 KiB of each body; secrets remain redacted in JSONL output.
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless --max-body 65536
 
-# Fixed-target TCP mode (also the future PostgreSQL routing seam)
+# Fixed-target TCP mode
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
+
+# PostgreSQL inspection endpoint. Point the application at Lens, not the real DB.
+cargo run -p lens-cli -- run --protocol postgres --listen 127.0.0.1:15432 \
+  --upstream 127.0.0.1:5432 --headless
+DATABASE_URL=postgresql://app@127.0.0.1:15432/app?sslmode=disable your-app
 ```
 
 `CONNECT` defaults to explicit-trust HTTPS inspection. Use `--https
@@ -36,6 +41,17 @@ forwarded application traffic. Stored HTTP records mask authorization, cookies,
 common secret headers, sensitive query/form fields, and JSON secret values by
 default. `--reveal` is an explicit local opt-in and marks captured message
 records as secret.
+
+PostgreSQL mode incrementally reports startup and SSL negotiation, authentication-safe
+metadata, simple and extended query boundaries, row metadata, errors, and query latency.
+SQL string/numeric literals are masked by default; passwords, SASL data, bind values,
+result values, COPY payloads, and backend key material are never retained, even with
+`--reveal`. For inspectable traffic on a trusted local hop, configure the client
+connection to the Lens endpoint with `sslmode=disable`. If the client requests
+PostgreSQL TLS and the upstream accepts it, Lens forwards the encrypted session unchanged
+and clearly marks the flow opaque. Do not disable TLS across an untrusted or remote
+network; use normal PostgreSQL TLS (opaque in this release) or a trusted local tunnel.
+Lens never downgrades database TLS.
 
 On Linux, `cert install` targets the current user's NSS database when
 `certutil` is available and also writes a merged system-plus-Lens client bundle.
