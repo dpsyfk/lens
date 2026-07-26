@@ -75,6 +75,11 @@ and clearly marks the flow opaque. Do not disable TLS across an untrusted or rem
 network; use normal PostgreSQL TLS (opaque in this release) or a trusted local tunnel.
 Lens never downgrades database TLS.
 
+Signed cross-platform archives, checksum and Sigstore verification, and platform
+installation steps are documented in [docs/INSTALL.md](docs/INSTALL.md). Follow
+[docs/UPGRADING.md](docs/UPGRADING.md) for rollback-safe upgrades. Maintainers use
+[docs/RELEASING.md](docs/RELEASING.md) to validate native signing and release gates.
+
 On Linux, `cert install` targets the current user's NSS database when
 `certutil` is available and also writes a merged system-plus-Lens client bundle.
 OpenSSL-based tools such as many `curl` builds can use the `client_bundle` path

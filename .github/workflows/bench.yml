@@ -1,10 +1,37 @@
-name: Bench
+name: Resource smoke
 
 on:
+  schedule:
+    - cron: "23 4 * * 3"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  placeholder:
+  bounded-load:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - run: echo "Bench placeholder"
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile release-mode load test
+        run: cargo test --locked --release -p lens-proxy --no-run
+      - name: Record load-test resource ceiling
+        shell: bash
+        run: |
+          /usr/bin/time -v -o resource-report.txt \
+            cargo test --locked --release -p lens-proxy \
+            tests::bounded_observation_stays_off_the_data_plane_under_load -- --exact
+          cat resource-report.txt
+          max_rss_kib="$(awk -F: '/Maximum resident set size/ {gsub(/ /, "", $2); print $2}' resource-report.txt)"
+          if [[ -z "$max_rss_kib" || "$max_rss_kib" -gt 524288 ]]; then
+            echo "::error::release-mode load smoke exceeded the 512 MiB CI ceiling"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: resource-report-${{ github.sha }}
+          path: resource-report.txt
+          retention-days: 30

@@ -1,10 +1,32 @@
-name: Fuzz
+name: Fuzz smoke
 
 on:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "crates/lens-proto-http1/**"
+      - "crates/lens-proto-postgres/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  placeholder:
+  decoder-fuzz-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo "Fuzz placeholder"
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Exercise HTTP/1 decoder
+        run: cargo fuzz run http1 -- -runs=512 -rss_limit_mb=512
+      - name: Exercise PostgreSQL decoder
+        run: cargo fuzz run postgres -- -runs=512 -rss_limit_mb=512

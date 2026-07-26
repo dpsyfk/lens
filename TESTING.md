@@ -213,6 +213,9 @@ Metrics:
 - They are a release-quality tool, not just a development curiosity.
 
 ## CI Strategy
+
+The repository implements this hierarchy in `ci.yml`, `integration.yml`, `fuzz.yml`, `bench.yml`, and `docs.yml`. Parser corpus cases run in the stable workspace suite, while short libFuzzer mutation runs exercise the same HTTP/1 and PostgreSQL state machines on relevant pull requests. Scheduled jobs extend load and resource reporting without slowing unrelated changes.
+
 ### Baseline pipeline
 Every pull request should run a fast baseline that includes:
 - formatting check

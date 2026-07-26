@@ -793,4 +793,29 @@ mod tests {
         assert!(batch.messages[0].truncated);
         assert_eq!(batch.messages[1].start_line, "Sync");
     }
+
+    #[test]
+    fn malformed_corpus_is_safe_at_every_fragment_boundary() {
+        const CORPUS: &[&[u8]] = &[
+            b"",
+            b"\0\0\0\0",
+            b"\0\0\0\x08\xff\xff\xff\xff",
+            b"\0\0\0\x09\0\x03\0\0x",
+            b"Q\0\0\0\x03",
+            b"B\xff\xff\xff\xff",
+            b"D\0\0\0\x08\0\x01\xff\xff\xff",
+        ];
+
+        for sample in CORPUS {
+            for split in 0..=sample.len() {
+                let mut decoder = PostgresDecoder::new(64);
+                let _ = decoder.push(Direction::ClientToServer, &sample[..split]);
+                let _ = decoder.push(Direction::ClientToServer, &sample[split..]);
+                let _ = decoder.push(Direction::ServerToClient, &sample[..split]);
+                let _ = decoder.push(Direction::ServerToClient, &sample[split..]);
+                let _ = decoder.finish(Direction::ClientToServer);
+                let _ = decoder.finish(Direction::ServerToClient);
+            }
+        }
+    }
 }

@@ -145,6 +145,9 @@ The right question is not whether the tool is fast in the abstract. The right qu
 - Real workloads are more valuable than synthetic ones alone, but synthetic microbenchmarks are easier to bisect when something slows down.
 
 ## CI Strategy
+
+The weekly `Resource smoke` workflow now records maximum resident memory for the release-mode saturated-observation test and rejects runs above a 512 MiB runner-level safety ceiling. This ceiling includes the test harness and is a catastrophic-regression gate, not a replacement for the 256 MiB product target. The `Hardening` workflow separately proves bounded store retention, queue drops under overload, forwarding completion, and shutdown deadlines.
+
 ### Fast path
 Every pull request should run:
 - formatting checks

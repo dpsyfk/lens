@@ -9,6 +9,37 @@ permissions:
   contents: read
 
 jobs:
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+  release-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile release helpers
+        run: python -m py_compile scripts/*.py
+      - name: Check workspace release version
+        run: python scripts/check-versions.py
+      - name: Prove deterministic archives and expected contents
+        shell: bash
+        run: |
+          mkdir -p target/package-test
+          printf '#!/bin/sh\necho lens\n' > target/package-test/lens
+          chmod +x target/package-test/lens
+          export SOURCE_DATE_EPOCH=1704067200
+          python scripts/package-release.py --binary target/package-test/lens --target test-target --version 0.1.0 --format tar.gz --output target/package-a
+          python scripts/package-release.py --binary target/package-test/lens --target test-target --version 0.1.0 --format tar.gz --output target/package-b
+          cmp target/package-a/*.tar.gz target/package-b/*.tar.gz
+          python scripts/verify-release.py target/package-a/*.tar.gz
+
   format:
     runs-on: ubuntu-latest
     steps:
