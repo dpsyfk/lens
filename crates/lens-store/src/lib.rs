@@ -63,6 +63,30 @@ pub struct StoreSnapshot {
     pub evicted: u64,
 }
 
+impl StoreSnapshot {
+    /// Renders one safe flow object per line for streaming diagnostics.
+    #[must_use]
+    pub fn to_jsonl(&self) -> String {
+        self.flows
+            .iter()
+            .map(StoredFlow::to_json_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Renders a deterministic JSON snapshot for file export.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let flows = self
+            .flows
+            .iter()
+            .map(StoredFlow::to_json_line)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{\"evicted\":{},\"flows\":[{flows}]}}", self.evicted)
+    }
+}
+
 #[derive(Debug, Default)]
 struct StoreState {
     flows: VecDeque<StoredFlow>,
@@ -650,5 +674,34 @@ mod tests {
         assert!(!exported.contains("secret"));
         assert!(exported.contains("token = '?' AND id = ?"));
         assert!(exported.contains("\"latency_nanos\":65"));
+    }
+
+    #[test]
+    fn snapshot_exports_are_deterministic_and_jsonl_has_one_flow_per_line() {
+        let mut snapshot = StoreSnapshot {
+            flows: Vec::new(),
+            evicted: 2,
+        };
+        let envelope = EventEnvelope::new("flow.opened", RunId::new(1), EventSource::Proxy)
+            .with_flow_id(FlowId::new(7));
+        snapshot.flows.push(StoredFlow {
+            record: FlowRecord::new(
+                envelope,
+                Endpoint::new("127.0.0.1", 5000),
+                Endpoint::new("example.test", 443),
+            )
+            .with_protocol("http1"),
+            client_to_upstream_bytes: 4,
+            upstream_to_client_bytes: 8,
+            failure: None,
+            decoder_error: None,
+            messages: Vec::new(),
+        });
+
+        assert_eq!(snapshot.to_jsonl().lines().count(), 1);
+        assert_eq!(
+            snapshot.to_json(),
+            format!("{{\"evicted\":2,\"flows\":[{}]}}", snapshot.to_jsonl())
+        );
     }
 }
