@@ -25,8 +25,8 @@ jobs:
         with:
           workspaces: fuzz
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo +nightly install cargo-fuzz --locked
       - name: Exercise HTTP/1 decoder
-        run: cargo fuzz run http1 -- -runs=512 -rss_limit_mb=512
+        run: cargo +nightly fuzz run http1 -- -runs=512 -rss_limit_mb=512
       - name: Exercise PostgreSQL decoder
-        run: cargo fuzz run postgres -- -runs=512 -rss_limit_mb=512
+        run: cargo +nightly fuzz run postgres -- -runs=512 -rss_limit_mb=512

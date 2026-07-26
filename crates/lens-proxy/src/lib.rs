@@ -1587,6 +1587,8 @@ mod tests {
         let mut response = Vec::new();
         healthy.read_to_end(&mut response).await.unwrap();
         assert!(response.ends_with(b"\r\n\r\nok"));
+        healthy.shutdown().await.unwrap();
+        drop(healthy);
 
         upstream_task.await.unwrap();
         shutdown.send(()).unwrap();
@@ -1640,6 +1642,8 @@ mod tests {
         let mut response = Vec::new();
         healthy.read_to_end(&mut response).await.unwrap();
         assert!(response.starts_with(b"HTTP/1.1 204"));
+        healthy.shutdown().await.unwrap();
+        drop(healthy);
 
         upstream_task.await.unwrap();
         shutdown.send(()).unwrap();

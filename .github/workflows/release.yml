@@ -185,7 +185,8 @@ jobs:
       - name: Build the same revision twice
         shell: bash
         run: |
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
           CARGO_TARGET_DIR=target/repro-a cargo build --locked --release -p lens-cli
           CARGO_TARGET_DIR=target/repro-b cargo build --locked --release -p lens-cli
           cmp target/repro-a/release/lens target/repro-b/release/lens
