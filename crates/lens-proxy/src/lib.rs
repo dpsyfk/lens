@@ -879,7 +879,10 @@ where
         loop {
             let read = reader.read(&mut buffer).await?;
             if read == 0 {
-                writer.shutdown().await?;
+                // The peer may already have closed its write side after all bytes were
+                // delivered. Half-close is best effort at EOF and must not turn a
+                // successfully transferred flow into a failure.
+                let _ = writer.shutdown().await;
                 return Ok(transferred);
             }
             writer.write_all(&buffer[..read]).await?;
