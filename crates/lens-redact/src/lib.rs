@@ -14,7 +14,7 @@ pub struct RedactionOutcome {
     pub redacted: bool,
 }
 
-/// Redacts common HTTP secrets unless reveal mode is explicitly enabled.
+/// Redacts common HTTP and PostgreSQL secrets unless reveal mode is enabled.
 #[derive(Clone, Debug)]
 pub struct Redactor {
     reveal: bool,
@@ -34,7 +34,7 @@ impl Redactor {
         }
     }
 
-    /// Applies header, query-string, form, and JSON secret redaction.
+    /// Applies HTTP structural redaction and PostgreSQL SQL-literal redaction.
     #[must_use]
     pub fn redact(&self, mut message: DecodedMessage) -> RedactionOutcome {
         if self.reveal {
@@ -44,12 +44,42 @@ impl Redactor {
             };
         }
 
+        let postgres = message.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("lens-protocol") && value.eq_ignore_ascii_case("postgres")
+        });
+        let sql_body = postgres
+            && message.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("lens-content") && value.eq_ignore_ascii_case("sql")
+            });
+
         let mut redacted = redact_start_line(&mut message.start_line);
         for (name, value) in &mut message.headers {
             if is_sensitive_name(name) && value != REPLACEMENT {
                 *value = REPLACEMENT.to_string();
                 redacted = true;
+            } else if postgres
+                && matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "message" | "detail" | "hint" | "where"
+                )
+            {
+                let (safe, changed) = redact_sql_literals(value);
+                if changed {
+                    *value = safe;
+                    redacted = true;
+                }
             }
+        }
+
+        if sql_body {
+            if let Ok(sql) = std::str::from_utf8(&message.body) {
+                let (safe, changed) = redact_sql_literals(sql);
+                if changed {
+                    message.body = safe.into_bytes();
+                    redacted = true;
+                }
+            }
+            return RedactionOutcome { message, redacted };
         }
 
         let content_type = message
@@ -88,6 +118,147 @@ impl Redactor {
 
         RedactionOutcome { message, redacted }
     }
+}
+
+/// Replaces PostgreSQL literal values and comment contents while preserving SQL shape.
+fn redact_sql_literals(sql: &str) -> (String, bool) {
+    let bytes = sql.as_bytes();
+    let mut safe = String::with_capacity(sql.len());
+    let mut index = 0;
+    let mut changed = false;
+
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            let mut end = index + 1;
+            while end < bytes.len() {
+                if bytes[end] == b'"' {
+                    end += 1;
+                    if bytes.get(end) == Some(&b'"') {
+                        end += 1;
+                        continue;
+                    }
+                    break;
+                }
+                end += 1;
+            }
+            safe.push_str(&sql[index..end]);
+            index = end;
+            continue;
+        }
+
+        if bytes[index] == b'\'' {
+            let mut end = index + 1;
+            while end < bytes.len() {
+                if bytes[end] == b'\'' {
+                    if bytes.get(end + 1) == Some(&b'\'') {
+                        end += 2;
+                        continue;
+                    }
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
+            safe.push_str("'?'");
+            index = end;
+            changed = true;
+            continue;
+        }
+
+        if bytes[index..].starts_with(b"--") {
+            let end = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |offset| index + offset);
+            safe.push_str("-- [REDACTED]");
+            if end < bytes.len() {
+                safe.push('\n');
+                index = end + 1;
+            } else {
+                index = end;
+            }
+            changed = true;
+            continue;
+        }
+
+        if bytes[index..].starts_with(b"/*") {
+            let end = find_bytes(&bytes[index + 2..], b"*/")
+                .map_or(bytes.len(), |offset| index + 2 + offset + 2);
+            safe.push_str("/* [REDACTED] */");
+            index = end;
+            changed = true;
+            continue;
+        }
+
+        if bytes[index] == b'$' {
+            if let Some(delimiter_end) = dollar_delimiter_end(&bytes[index..]) {
+                let delimiter = &sql[index..index + delimiter_end];
+                let content_start = index + delimiter_end;
+                if let Some(content_len) = sql[content_start..].find(delimiter) {
+                    safe.push_str(delimiter);
+                    safe.push('?');
+                    safe.push_str(delimiter);
+                    index = content_start + content_len + delimiter.len();
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+
+        if is_number_start(bytes, index) {
+            let mut end = index + 1;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_digit()
+                    || matches!(bytes[end], b'.' | b'e' | b'E' | b'+' | b'-'))
+            {
+                end += 1;
+            }
+            safe.push('?');
+            index = end;
+            changed = true;
+            continue;
+        }
+
+        let character = sql[index..].chars().next().expect("valid UTF-8 boundary");
+        safe.push(character);
+        index += character.len_utf8();
+    }
+
+    (safe, changed)
+}
+
+fn is_number_start(bytes: &[u8], index: usize) -> bool {
+    if !bytes[index].is_ascii_digit() {
+        return false;
+    }
+    let previous = index
+        .checked_sub(1)
+        .and_then(|value| bytes.get(value))
+        .copied();
+    let next = bytes.get(index + 1).copied();
+    !previous.is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+        && !next.is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+}
+
+fn dollar_delimiter_end(bytes: &[u8]) -> Option<usize> {
+    if bytes.first() != Some(&b'$') {
+        return None;
+    }
+    for (offset, byte) in bytes.iter().enumerate().skip(1) {
+        if *byte == b'$' {
+            return Some(offset + 1);
+        }
+        if !byte.is_ascii_alphanumeric() && *byte != b'_' {
+            return None;
+        }
+    }
+    None
+}
+
+fn find_bytes(buffer: &[u8], needle: &[u8]) -> Option<usize> {
+    buffer
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 impl Default for Redactor {
@@ -299,5 +470,44 @@ mod tests {
         let outcome = Redactor::new(true).redact(original.clone());
         assert!(!outcome.redacted);
         assert_eq!(outcome.message, original);
+    }
+
+    #[test]
+    fn redacts_postgres_literals_and_comments_but_keeps_placeholders() {
+        let message = DecodedMessage {
+            direction: Direction::ClientToServer,
+            start_line: "Query".to_string(),
+            headers: vec![
+                ("lens-protocol".to_string(), "postgres".to_string()),
+                ("lens-content".to_string(), "sql".to_string()),
+            ],
+            body: b"SELECT * FROM users_2 WHERE id = 42 AND name = 'Ada' AND ref = $1 -- token abc"
+                .to_vec(),
+            truncated: false,
+        };
+        let outcome = Redactor::default().redact(message);
+        let sql = String::from_utf8(outcome.message.body).unwrap();
+        assert!(outcome.redacted);
+        assert_eq!(
+            sql,
+            "SELECT * FROM users_2 WHERE id = ? AND name = '?' AND ref = $1 -- [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn postgres_reveal_preserves_sql_but_decoder_metadata_stays_safe() {
+        let message = DecodedMessage {
+            direction: Direction::ClientToServer,
+            start_line: "Query".to_string(),
+            headers: vec![
+                ("lens-protocol".to_string(), "postgres".to_string()),
+                ("lens-content".to_string(), "sql".to_string()),
+            ],
+            body: b"SELECT 'visible', 42".to_vec(),
+            truncated: false,
+        };
+        let outcome = Redactor::new(true).redact(message.clone());
+        assert!(!outcome.redacted);
+        assert_eq!(outcome.message, message);
     }
 }

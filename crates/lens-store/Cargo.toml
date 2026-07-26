@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 lens-core = { path = "../lens-core" }
 lens-proto-http1 = { path = "../lens-proto-http1" }
+lens-proto-postgres = { path = "../lens-proto-postgres" }
 lens-protocol = { path = "../lens-protocol" }
 lens-redact = { path = "../lens-redact" }
 tokio = { version = "1.48", features = ["sync"] }

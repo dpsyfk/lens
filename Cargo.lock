@@ -389,6 +389,10 @@ dependencies = [
 [[package]]
 name = "lens-proto-postgres"
 version = "0.1.0"
+dependencies = [
+ "lens-core",
+ "lens-protocol",
+]
 
 [[package]]
 name = "lens-protocol"
@@ -426,6 +430,7 @@ version = "0.1.0"
 dependencies = [
  "lens-core",
  "lens-proto-http1",
+ "lens-proto-postgres",
  "lens-protocol",
  "lens-redact",
  "tokio",

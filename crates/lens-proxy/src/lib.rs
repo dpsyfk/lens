@@ -148,6 +148,24 @@ pub enum ProxyTarget {
     Http,
 }
 
+/// Protocol classification for fixed-target connections.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FixedProtocol {
+    /// Opaque TCP forwarding without payload observations.
+    Tcp,
+    /// PostgreSQL forwarding with bounded protocol observations.
+    Postgres,
+}
+
+impl FixedProtocol {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Postgres => "postgres",
+        }
+    }
+}
+
 /// How Lens handles HTTPS `CONNECT` tunnels.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HttpsMode {
@@ -211,6 +229,8 @@ impl TlsInterception {
 pub struct ProxyRuntimeConfig {
     /// Target selection behavior.
     pub target: ProxyTarget,
+    /// Protocol label and inspection policy for a fixed target.
+    pub fixed_protocol: FixedProtocol,
     /// Maximum time allowed to establish an upstream connection.
     pub connect_timeout: Duration,
     /// Time allowed for active connection tasks to finish after shutdown.
@@ -233,6 +253,7 @@ impl ProxyRuntimeConfig {
     pub fn fixed(upstream: Endpoint) -> Self {
         Self {
             target: ProxyTarget::Fixed(upstream),
+            fixed_protocol: FixedProtocol::Tcp,
             connect_timeout: Duration::from_secs(10),
             shutdown_grace: Duration::from_secs(5),
             https_mode: HttpsMode::Passthrough,
@@ -245,11 +266,20 @@ impl ProxyRuntimeConfig {
     pub const fn http() -> Self {
         Self {
             target: ProxyTarget::Http,
+            fixed_protocol: FixedProtocol::Tcp,
             connect_timeout: Duration::from_secs(10),
             shutdown_grace: Duration::from_secs(5),
             https_mode: HttpsMode::Passthrough,
             tls: None,
         }
+    }
+
+    /// Creates explicit PostgreSQL forwarding settings for one upstream.
+    #[must_use]
+    pub fn postgres(upstream: Endpoint) -> Self {
+        let mut config = Self::fixed(upstream);
+        config.fixed_protocol = FixedProtocol::Postgres;
+        config
     }
 
     /// Enables HTTPS interception with the supplied CA and upstream verifier.
@@ -502,7 +532,7 @@ async fn forward_connection(
     let route = match &config.target {
         ProxyTarget::Fixed(upstream) => Route {
             upstream: upstream.clone(),
-            protocol: "tcp",
+            protocol: config.fixed_protocol.label(),
             behavior: RouteBehavior::Fixed,
         },
         ProxyTarget::Http => match read_http_route(&mut client).await {
@@ -582,7 +612,7 @@ async fn forward_connection(
                 flow_id,
                 observer.cloned(),
                 clock.clone(),
-                false,
+                protocol != "tcp",
             )
             .await
         }
@@ -1216,6 +1246,47 @@ mod tests {
         shutdown.send(()).unwrap();
         let stats = task.await.unwrap().unwrap();
         assert_eq!((stats.accepted, stats.completed, stats.failed), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn postgres_fixed_target_is_labeled_and_observed() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).await.unwrap();
+            stream.write_all(b"pong").await.unwrap();
+        });
+        let config = ProxyRuntimeConfig::postgres(Endpoint::new(
+            upstream_addr.ip().to_string(),
+            upstream_addr.port(),
+        ));
+        let (observer, mut observations) = ObservationSink::channel(16);
+        let server = bind_server(config).with_observer(observer);
+        let (address, shutdown, task) = run_server(server).await;
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut response = [0_u8; 4];
+        client.read_exact(&mut response).await.unwrap();
+        drop(client);
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
+
+        let mut protocol = None;
+        let mut data_events = 0;
+        while let Some(event) = observations.recv().await {
+            match event.kind {
+                ObservationKind::Opened {
+                    protocol: observed, ..
+                } => protocol = observed,
+                ObservationKind::Data { .. } => data_events += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(protocol.as_deref(), Some("postgres"));
+        assert_eq!(data_events, 2);
     }
 
     #[tokio::test]

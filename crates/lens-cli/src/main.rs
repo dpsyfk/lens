@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use lens_core::RunId;
+use lens_core::{Endpoint, RunId};
 use lens_platform::{PlatformKind, TrustState, UserTrustStore};
 use lens_proxy::{
     HttpsMode, ListenerConfig, ObservationSink, ProxyListener, ProxyMode as ProxyListenMode,
@@ -107,9 +107,20 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         .enable_all()
         .build()
         .map_err(|error| CliError::RuntimeFailed(error.to_string()))?;
-    let runtime_config = match config.upstream_addr {
-        Some(upstream) => ProxyRuntimeConfig::new(upstream),
-        None => match config.https_mode {
+    let runtime_config = match config.protocol {
+        TrafficProtocol::Tcp => ProxyRuntimeConfig::fixed(
+            config
+                .upstream_endpoint
+                .clone()
+                .expect("TCP configuration requires an upstream"),
+        ),
+        TrafficProtocol::Postgres => ProxyRuntimeConfig::postgres(
+            config
+                .upstream_endpoint
+                .clone()
+                .expect("PostgreSQL configuration requires an upstream"),
+        ),
+        TrafficProtocol::Http => match config.https_mode {
             HttpsMode::Intercept => {
                 let paths = CaPaths::for_user()
                     .map_err(|error| CliError::Certificate(error.to_string()))?;
@@ -325,6 +336,12 @@ impl Cli {
                             .ok_or_else(|| CliError::MissingValue("--upstream".to_string()))?,
                     );
                 }
+                "--protocol" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("--protocol".to_string()))?;
+                    flags.protocol = Some(value.parse()?);
+                }
                 "--mode" => {
                     let value = args
                         .next()
@@ -465,6 +482,40 @@ enum ProxyMode {
     Transparent,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TrafficProtocol {
+    Http,
+    Tcp,
+    Postgres,
+}
+
+impl fmt::Display for TrafficProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Http => "http",
+            Self::Tcp => "tcp",
+            Self::Postgres => "postgres",
+        })
+    }
+}
+
+impl std::str::FromStr for TrafficProtocol {
+    type Err = CliError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "http" => Ok(Self::Http),
+            "tcp" => Ok(Self::Tcp),
+            "postgres" | "postgresql" => Ok(Self::Postgres),
+            _ => Err(CliError::InvalidValue {
+                name: "--protocol".to_string(),
+                value: value.to_string(),
+                expected: "http, tcp, or postgres".to_string(),
+            }),
+        }
+    }
+}
+
 impl fmt::Display for ProxyMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -494,6 +545,7 @@ impl std::str::FromStr for ProxyMode {
 struct ConfigValues {
     listen: Option<String>,
     upstream: Option<String>,
+    protocol: Option<TrafficProtocol>,
     mode: Option<ProxyMode>,
     https_mode: Option<HttpsMode>,
     reveal: Option<bool>,
@@ -507,6 +559,9 @@ impl ConfigValues {
         Self {
             listen: env_vars.get("LENS_LISTEN").cloned(),
             upstream: env_vars.get("LENS_UPSTREAM").cloned(),
+            protocol: env_vars
+                .get("LENS_PROTOCOL")
+                .and_then(|value| value.parse().ok()),
             mode: env_vars
                 .get("LENS_MODE")
                 .and_then(|value| value.parse().ok()),
@@ -534,7 +589,8 @@ struct ResolvedConfig {
     listen: String,
     listen_addr: SocketAddr,
     upstream: Option<String>,
-    upstream_addr: Option<SocketAddr>,
+    upstream_endpoint: Option<Endpoint>,
+    protocol: TrafficProtocol,
     mode: ProxyMode,
     https_mode: HttpsMode,
     reveal: bool,
@@ -564,22 +620,40 @@ impl ResolvedConfig {
             .and_then(|values| values.upstream.clone())
             .or_else(|| env_vars.and_then(|values| values.upstream.clone()))
             .or_else(|| file.and_then(|values| values.upstream.clone()));
-        let upstream_addr = upstream
-            .as_deref()
-            .map(|value| {
-                value.parse().map_err(|_| CliError::InvalidValue {
+        let upstream_endpoint = upstream.as_deref().map(parse_endpoint).transpose()?;
+        let requested_protocol = flags
+            .and_then(|values| values.protocol)
+            .or_else(|| env_vars.and_then(|values| values.protocol))
+            .or_else(|| file.and_then(|values| values.protocol));
+        let protocol = requested_protocol.unwrap_or(if upstream_endpoint.is_some() {
+            TrafficProtocol::Tcp
+        } else {
+            TrafficProtocol::Http
+        });
+        match (protocol, upstream_endpoint.is_some()) {
+            (TrafficProtocol::Http, true) => {
+                return Err(CliError::InvalidValue {
                     name: "--upstream".to_string(),
-                    value: value.to_string(),
-                    expected: "addr:port, for example 127.0.0.1:8080".to_string(),
-                })
-            })
-            .transpose()?;
+                    value: upstream.clone().unwrap_or_default(),
+                    expected: "no fixed upstream when --protocol http is selected".to_string(),
+                });
+            }
+            (TrafficProtocol::Tcp | TrafficProtocol::Postgres, false) => {
+                return Err(CliError::InvalidValue {
+                    name: "--protocol".to_string(),
+                    value: protocol.to_string(),
+                    expected: "--upstream host:port for fixed-target protocols".to_string(),
+                });
+            }
+            _ => {}
+        }
 
         Ok(Self {
             listen,
             listen_addr,
             upstream,
-            upstream_addr,
+            upstream_endpoint,
+            protocol,
             mode: pick(
                 flags.and_then(|values| values.mode),
                 env_vars.and_then(|values| values.mode),
@@ -651,6 +725,7 @@ fn parse_config_file(contents: &str) -> ConfigValues {
         match key {
             "listen" => values.listen = Some(value.to_string()),
             "upstream" => values.upstream = Some(value.to_string()),
+            "protocol" => values.protocol = value.parse().ok(),
             "mode" => values.mode = value.parse().ok(),
             "https" => values.https_mode = parse_https_mode(value).ok(),
             "reveal" => values.reveal = parse_bool(value).ok(),
@@ -674,6 +749,28 @@ fn parse_bool(value: &str) -> Result<bool, CliError> {
             expected: "true, false, 1, 0, yes, no, on, or off".to_string(),
         }),
     }
+}
+
+fn parse_endpoint(value: &str) -> Result<Endpoint, CliError> {
+    let invalid = || CliError::InvalidValue {
+        name: "--upstream".to_string(),
+        value: value.to_string(),
+        expected: "host:port, for example db.example.com:5432".to_string(),
+    };
+    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+        rest.split_once("]:").ok_or_else(&invalid)?
+    } else {
+        value.rsplit_once(':').ok_or_else(&invalid)?
+    };
+    let port = port.parse::<u16>().map_err(|_| invalid())?;
+    if host.is_empty()
+        || host.chars().any(char::is_whitespace)
+        || host.contains('/')
+        || host.contains(':') && !value.starts_with('[')
+    {
+        return Err(invalid());
+    }
+    Ok(Endpoint::new(host, port))
 }
 
 fn parse_https_mode(value: &str) -> Result<HttpsMode, CliError> {
@@ -707,8 +804,9 @@ fn parse_positive_usize(name: &str, value: &str) -> Result<usize, CliError> {
 
 fn render_run_plan(config: &ResolvedConfig) -> String {
     format!(
-        "lens run\nmode: {}\nlisten: {}\nupstream: {}\nhttps: {}\nredaction: {}\nheadless: {}\nmax_flows: {}\nmax_body: {} bytes",
+        "lens run\nmode: {}\nprotocol: {}\nlisten: {}\nupstream: {}\nhttps: {}\nredaction: {}\nheadless: {}\nmax_flows: {}\nmax_body: {} bytes",
         config.mode,
+        config.protocol,
         config.listen,
         config
             .upstream
@@ -728,8 +826,9 @@ fn render_doctor_report(config: &ResolvedConfig, check: DoctorCheck) -> String {
 
     if matches!(check, DoctorCheck::All | DoctorCheck::Config) {
         lines.push(format!(
-            "config: ok; mode={}, listen={}, https={}, redaction={}",
+            "config: ok; mode={}, protocol={}, listen={}, https={}, redaction={}",
             config.mode,
+            config.protocol,
             config.listen,
             config.https_mode,
             if config.reveal { "revealed" } else { "enabled" }
@@ -865,7 +964,9 @@ COMMANDS:
 GLOBAL OPTIONS:
   --config <path>            Read simple key = value configuration
   --listen <addr:port>       Listen address [default: 127.0.0.1:8888]
-  --upstream <addr:port>     Optional fixed TCP target; omit for HTTP proxy mode
+  --upstream <host:port>     Fixed target for TCP or PostgreSQL mode
+  --protocol <http|tcp|postgres>
+                             Protocol to route and inspect [auto-detected from upstream]
   --mode <explicit|transparent>
                              How traffic reaches Lens [default: explicit]
   --https <intercept|passthrough|reject>
@@ -884,6 +985,7 @@ EXAMPLES:
   lens cert status
   HTTP_PROXY=http://127.0.0.1:8888 lens run --headless
   lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
+  lens run --protocol postgres --listen 127.0.0.1:15432 --upstream db.example.com:5432 --headless
   lens doctor --check all
 ";
 
@@ -951,6 +1053,7 @@ max_body = 64
 
         assert!(output.contains("listen: 127.0.0.1:9999"));
         assert!(output.contains("upstream: 127.0.0.1:8080"));
+        assert!(output.contains("protocol: tcp"));
         assert!(output.contains("mode: explicit"));
         assert!(output.contains("https: passthrough"));
         assert!(output.contains("redaction: revealed"));
@@ -1035,7 +1138,55 @@ max_body = 64
         .unwrap();
 
         assert!(output.contains("upstream: selected from HTTP request"));
+        assert!(output.contains("protocol: http"));
         assert!(output.contains("https: intercept"));
+    }
+
+    #[test]
+    fn postgres_mode_accepts_a_hostname_upstream() {
+        let output = run(
+            vec![
+                "run",
+                "--protocol",
+                "postgres",
+                "--listen",
+                "127.0.0.1:15432",
+                "--upstream",
+                "db.example.com:5432",
+                "--headless",
+            ],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap();
+
+        assert!(output.contains("protocol: postgres"));
+        assert!(output.contains("upstream: db.example.com:5432"));
+        assert_eq!(
+            parse_endpoint("[::1]:5432").unwrap(),
+            Endpoint::new("::1", 5432)
+        );
+    }
+
+    #[test]
+    fn postgres_mode_requires_an_upstream() {
+        let error = run(
+            vec!["run", "--protocol", "postgres"],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CliError::InvalidValue {
+                name: "--protocol".to_string(),
+                value: "postgres".to_string(),
+                expected: "--upstream host:port for fixed-target protocols".to_string(),
+            }
+        );
     }
 
     #[test]
