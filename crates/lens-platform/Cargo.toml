@@ -7,3 +7,6 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+lens-tls = { path = "../lens-tls" }

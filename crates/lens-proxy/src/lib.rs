@@ -7,8 +7,10 @@
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, TcpListener};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http::uri::Authority;
@@ -16,11 +18,15 @@ use http::Uri;
 use lens_core::{
     Clock, CoreError, Direction, Endpoint, FlowId, ObservationEvent, ObservationKind, SystemClock,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use lens_tls::{platform_client_config, CertificateAuthority};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::ClientConfig;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 const MAX_HTTP_HEAD_BYTES: usize = 64 * 1024;
 
@@ -142,8 +148,66 @@ pub enum ProxyTarget {
     Http,
 }
 
+/// How Lens handles HTTPS `CONNECT` tunnels.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HttpsMode {
+    /// Terminate TLS, verify the upstream, and observe decrypted HTTP/1.1.
+    Intercept,
+    /// Forward encrypted bytes without inspection, for pinned clients.
+    Passthrough,
+    /// Refuse HTTPS tunnels explicitly.
+    Reject,
+}
+
+impl fmt::Display for HttpsMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Intercept => "intercept",
+            Self::Passthrough => "passthrough",
+            Self::Reject => "reject",
+        })
+    }
+}
+
+/// Certificate authority and upstream verifier used for HTTPS interception.
+#[derive(Clone)]
+pub struct TlsInterception {
+    authority: Arc<CertificateAuthority>,
+    upstream: Arc<ClientConfig>,
+}
+
+impl fmt::Debug for TlsInterception {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlsInterception")
+            .field("authority", &self.authority)
+            .field("upstream_verifier", &"platform-or-explicit-roots")
+            .finish()
+    }
+}
+
+impl TlsInterception {
+    /// Uses normal platform trust for upstream HTTPS servers.
+    pub fn with_platform_verifier(
+        authority: Arc<CertificateAuthority>,
+    ) -> Result<Self, lens_tls::TlsError> {
+        Ok(Self {
+            authority,
+            upstream: platform_client_config()?,
+        })
+    }
+
+    /// Uses an explicit upstream verifier, primarily for isolated integration tests.
+    #[must_use]
+    pub fn new(authority: Arc<CertificateAuthority>, upstream: Arc<ClientConfig>) -> Self {
+        Self {
+            authority,
+            upstream,
+        }
+    }
+}
+
 /// Runtime settings for a forwarding session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct ProxyRuntimeConfig {
     /// Target selection behavior.
     pub target: ProxyTarget,
@@ -151,6 +215,10 @@ pub struct ProxyRuntimeConfig {
     pub connect_timeout: Duration,
     /// Time allowed for active connection tasks to finish after shutdown.
     pub shutdown_grace: Duration,
+    /// HTTPS CONNECT behavior.
+    pub https_mode: HttpsMode,
+    /// TLS authority and upstream verifier when interception is enabled.
+    pub tls: Option<TlsInterception>,
 }
 
 impl ProxyRuntimeConfig {
@@ -167,6 +235,8 @@ impl ProxyRuntimeConfig {
             target: ProxyTarget::Fixed(upstream),
             connect_timeout: Duration::from_secs(10),
             shutdown_grace: Duration::from_secs(5),
+            https_mode: HttpsMode::Passthrough,
+            tls: None,
         }
     }
 
@@ -177,7 +247,24 @@ impl ProxyRuntimeConfig {
             target: ProxyTarget::Http,
             connect_timeout: Duration::from_secs(10),
             shutdown_grace: Duration::from_secs(5),
+            https_mode: HttpsMode::Passthrough,
+            tls: None,
         }
+    }
+
+    /// Enables HTTPS interception with the supplied CA and upstream verifier.
+    #[must_use]
+    pub fn with_tls_interception(mut self, tls: TlsInterception) -> Self {
+        self.https_mode = HttpsMode::Intercept;
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Selects an explicit CONNECT mode. Interception still requires TLS state.
+    #[must_use]
+    pub fn with_https_mode(mut self, mode: HttpsMode) -> Self {
+        self.https_mode = mode;
+        self
     }
 }
 
@@ -427,6 +514,13 @@ async fn forward_connection(
         },
     };
 
+    let is_connect = matches!(&route.behavior, RouteBehavior::Connect(_));
+    let protocol = if is_connect && config.https_mode == HttpsMode::Intercept {
+        "http1"
+    } else {
+        route.protocol
+    };
+
     emit(
         observer,
         ObservationEvent::new(
@@ -435,13 +529,26 @@ async fn forward_connection(
             ObservationKind::Opened {
                 client: Endpoint::new(peer.ip().to_string(), peer.port()),
                 upstream: route.upstream.clone(),
-                protocol: Some(route.protocol.to_string()),
+                protocol: Some(protocol.to_string()),
             },
         ),
     );
-    tracing::info!(flow_id = %flow_id, peer = %peer, upstream = %route.upstream, protocol = route.protocol, "flow opened");
+    tracing::info!(flow_id = %flow_id, peer = %peer, upstream = %route.upstream, protocol, "flow opened");
 
-    let mut upstream = match timeout(
+    if is_connect && config.https_mode == HttpsMode::Reject {
+        let reason = "HTTPS CONNECT rejected by configured policy";
+        let _ = write_http_error(&mut client, 403, "HTTPS CONNECT Rejected").await;
+        emit_failed(observer, flow_id, clock, reason);
+        return Err(CoreError::operation_failed("CONNECT", reason));
+    }
+    if is_connect && config.https_mode == HttpsMode::Intercept && config.tls.is_none() {
+        let reason = "HTTPS interception is enabled but CA state is unavailable";
+        let _ = write_http_error(&mut client, 503, "HTTPS Interception Unavailable").await;
+        emit_failed(observer, flow_id, clock, reason);
+        return Err(CoreError::operation_failed("CONNECT", reason));
+    }
+
+    let upstream = match timeout(
         config.connect_timeout,
         TcpStream::connect((route.upstream.host.as_str(), route.upstream.port)),
     )
@@ -466,15 +573,28 @@ async fn forward_connection(
         }
     };
 
-    let inspect = route.protocol == "http1";
-    let initial_client_bytes = match route.behavior {
-        RouteBehavior::Fixed => 0,
+    let upstream_endpoint = route.upstream.clone();
+    let counts = match route.behavior {
+        RouteBehavior::Fixed => {
+            mirror_bidirectional(
+                client,
+                upstream,
+                flow_id,
+                observer.cloned(),
+                clock.clone(),
+                false,
+            )
+            .await
+        }
         RouteBehavior::Forward(request) => {
+            let mut upstream = upstream;
             let bytes = request.len() as u64;
-            upstream.write_all(&request).await.map_err(|error| {
-                CoreError::operation_failed("forward request", error.to_string())
-            })?;
-            if inspect {
+            if let Err(error) = upstream.write_all(&request).await {
+                Err(CoreError::operation_failed(
+                    "forward request",
+                    error.to_string(),
+                ))
+            } else {
                 emit(
                     observer,
                     ObservationEvent::new(
@@ -486,40 +606,84 @@ async fn forward_connection(
                         },
                     ),
                 );
-            }
-            bytes
-        }
-        RouteBehavior::Connect(prefetched) => {
-            client
-                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                mirror_bidirectional(
+                    client,
+                    upstream,
+                    flow_id,
+                    observer.cloned(),
+                    clock.clone(),
+                    true,
+                )
                 .await
-                .map_err(|error| {
-                    CoreError::operation_failed("CONNECT response", error.to_string())
-                })?;
-            upstream.write_all(&prefetched).await.map_err(|error| {
-                CoreError::operation_failed("forward CONNECT preface", error.to_string())
-            })?;
-            prefetched.len() as u64
+                .map(|(client_to_upstream, upstream_to_client)| {
+                    (client_to_upstream.saturating_add(bytes), upstream_to_client)
+                })
+            }
         }
+        RouteBehavior::Connect(prefetched) => match config.https_mode {
+            HttpsMode::Passthrough => {
+                if let Err(error) = client
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .await
+                {
+                    Err(CoreError::operation_failed(
+                        "CONNECT response",
+                        error.to_string(),
+                    ))
+                } else {
+                    let mut upstream = upstream;
+                    let prefetched_bytes = prefetched.len() as u64;
+                    if let Err(error) = upstream.write_all(&prefetched).await {
+                        Err(CoreError::operation_failed(
+                            "forward CONNECT preface",
+                            error.to_string(),
+                        ))
+                    } else {
+                        mirror_bidirectional(
+                            client,
+                            upstream,
+                            flow_id,
+                            observer.cloned(),
+                            clock.clone(),
+                            false,
+                        )
+                        .await
+                        .map(|(client_to_upstream, upstream_to_client)| {
+                            (
+                                client_to_upstream.saturating_add(prefetched_bytes),
+                                upstream_to_client,
+                            )
+                        })
+                    }
+                }
+            }
+            HttpsMode::Intercept => {
+                intercept_connect(
+                    client,
+                    upstream,
+                    prefetched,
+                    InterceptContext {
+                        endpoint: &upstream_endpoint,
+                        tls: config.tls.as_ref().expect("TLS state checked above"),
+                        handshake_timeout: config.connect_timeout,
+                        flow_id,
+                        observer: observer.cloned(),
+                        clock: clock.clone(),
+                    },
+                )
+                .await
+            }
+            HttpsMode::Reject => unreachable!("rejected before connecting upstream"),
+        },
     };
 
-    let (client_to_upstream, upstream_to_client) = match mirror_bidirectional(
-        client,
-        upstream,
-        flow_id,
-        observer.cloned(),
-        clock.clone(),
-        inspect,
-    )
-    .await
-    {
+    let (client_to_upstream, upstream_to_client) = match counts {
         Ok(counts) => counts,
         Err(error) => {
             emit_failed(observer, flow_id, clock, &error.to_string());
             return Err(error);
         }
     };
-    let client_to_upstream = client_to_upstream.saturating_add(initial_client_bytes);
     counters
         .client_to_upstream_bytes
         .fetch_add(client_to_upstream, Ordering::Relaxed);
@@ -557,16 +721,104 @@ async fn forward_connection(
     Ok(())
 }
 
-async fn mirror_bidirectional(
-    client: TcpStream,
+struct InterceptContext<'a> {
+    endpoint: &'a Endpoint,
+    tls: &'a TlsInterception,
+    handshake_timeout: Duration,
+    flow_id: FlowId,
+    observer: Option<ObservationSink>,
+    clock: SystemClock,
+}
+
+async fn intercept_connect(
+    mut client: TcpStream,
     upstream: TcpStream,
+    prefetched: Vec<u8>,
+    context: InterceptContext<'_>,
+) -> Result<(u64, u64), CoreError> {
+    let InterceptContext {
+        endpoint,
+        tls,
+        handshake_timeout,
+        flow_id,
+        observer,
+        clock,
+    } = context;
+    let server_config = tls
+        .authority
+        .server_config(&endpoint.host)
+        .map_err(|error| {
+            CoreError::operation_failed("issue HTTPS certificate", error.to_string())
+        })?;
+    let server_name = ServerName::try_from(endpoint.host.clone()).map_err(|error| {
+        CoreError::operation_failed("validate HTTPS upstream name", error.to_string())
+    })?;
+    let upstream_tls = match timeout(
+        handshake_timeout,
+        TlsConnector::from(Arc::clone(&tls.upstream)).connect(server_name, upstream),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            let _ = write_http_error(&mut client, 502, "Upstream TLS Failed").await;
+            return Err(CoreError::operation_failed(
+                "verify upstream TLS",
+                error.to_string(),
+            ));
+        }
+        Err(_) => {
+            let _ = write_http_error(&mut client, 504, "Upstream TLS Timeout").await;
+            return Err(CoreError::operation_failed(
+                "verify upstream TLS",
+                "handshake timed out",
+            ));
+        }
+    };
+
+    client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await
+        .map_err(|error| CoreError::operation_failed("CONNECT response", error.to_string()))?;
+    let client = PrefixedIo::new(client, prefetched);
+    let client_tls = match timeout(
+        handshake_timeout,
+        TlsAcceptor::from(server_config).accept(client),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            return Err(CoreError::operation_failed(
+                "accept client TLS",
+                format!("{error}; the client may not trust Lens or may use certificate pinning"),
+            ));
+        }
+        Err(_) => {
+            return Err(CoreError::operation_failed(
+                "accept client TLS",
+                "handshake timed out; the client may use certificate pinning",
+            ));
+        }
+    };
+
+    mirror_bidirectional(client_tls, upstream_tls, flow_id, observer, clock, true).await
+}
+
+async fn mirror_bidirectional<C, U>(
+    client: C,
+    upstream: U,
     flow_id: FlowId,
     observer: Option<ObservationSink>,
     clock: SystemClock,
     inspect: bool,
-) -> Result<(u64, u64), CoreError> {
-    let (client_read, client_write) = client.into_split();
-    let (upstream_read, upstream_write) = upstream.into_split();
+) -> Result<(u64, u64), CoreError>
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (client_read, client_write) = tokio::io::split(client);
+    let (upstream_read, upstream_write) = tokio::io::split(upstream);
     let mut pumps = JoinSet::new();
     pumps.spawn(pump(
         client_read,
@@ -618,16 +870,24 @@ async fn pump<R, W>(
     inspect: bool,
 ) -> (Direction, io::Result<u64>)
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
 {
     let result = async {
         let mut transferred = 0_u64;
         let mut buffer = vec![0_u8; 16 * 1024];
         loop {
-            let read = reader.read(&mut buffer).await?;
+            let read = match reader.read(&mut buffer).await {
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => 0,
+                Err(error) => return Err(error),
+            };
             if read == 0 {
-                writer.shutdown().await?;
+                // The peer may already have closed its write side after all bytes were
+                // delivered. TLS peers also commonly close without a close_notify,
+                // which rustls reports as UnexpectedEof. Half-close is best effort
+                // and must not turn a successfully transferred flow into a failure.
+                let _ = writer.shutdown().await;
                 return Ok(transferred);
             }
             writer.write_all(&buffer[..read]).await?;
@@ -649,6 +909,64 @@ where
     }
     .await;
     (direction, result)
+}
+
+#[derive(Debug)]
+struct PrefixedIo<S> {
+    inner: S,
+    prefix: Vec<u8>,
+    offset: usize,
+}
+
+impl<S> PrefixedIo<S> {
+    fn new(inner: S, prefix: Vec<u8>) -> Self {
+        Self {
+            inner,
+            prefix,
+            offset: 0,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedIo<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.offset < self.prefix.len() {
+            let available = &self.prefix[self.offset..];
+            let copied = available.len().min(buffer.remaining());
+            buffer.put_slice(&available[..copied]);
+            self.offset += copied;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(context, buffer)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.inner).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
+    }
 }
 
 fn emit(observer: Option<&ObservationSink>, event: ObservationEvent) {
@@ -789,7 +1107,13 @@ async fn write_http_error(client: &mut TcpStream, status: u16, reason: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use lens_tls::CaPaths;
+    use rcgen::generate_simple_self_signed;
     use tokio::sync::oneshot;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::rustls::{RootCertStore, ServerConfig};
 
     fn bind_server(config: ProxyRuntimeConfig) -> ProxyServer {
         let listener =
@@ -811,7 +1135,7 @@ mod tests {
         (address, shutdown_tx, task)
     }
 
-    async fn read_head(stream: &mut TcpStream) -> Vec<u8> {
+    async fn read_head<S: AsyncRead + Unpin>(stream: &mut S) -> Vec<u8> {
         let mut bytes = Vec::new();
         loop {
             let mut chunk = [0_u8; 256];
@@ -822,6 +1146,37 @@ mod tests {
                 return bytes;
             }
         }
+    }
+
+    fn test_tls_server(host: &str) -> (Arc<ServerConfig>, CertificateDer<'static>) {
+        let generated = generate_simple_self_signed(vec![host.to_string()]).unwrap();
+        let certificate = generated.cert.der().clone();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            generated.signing_key.serialize_der(),
+        ));
+        let mut config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], key)
+            .unwrap();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        (Arc::new(config), certificate)
+    }
+
+    fn test_tls_interception(
+        directory: &Path,
+        upstream_certificate: CertificateDer<'static>,
+    ) -> (Arc<CertificateAuthority>, TlsInterception) {
+        let authority = Arc::new(
+            CertificateAuthority::load_or_create(CaPaths::from_directory(directory)).unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(upstream_certificate).unwrap();
+        let mut upstream = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        upstream.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let interception = TlsInterception::new(Arc::clone(&authority), Arc::new(upstream));
+        (authority, interception)
     }
 
     #[test]
@@ -891,6 +1246,7 @@ mod tests {
         assert!(String::from_utf8(response)
             .unwrap()
             .starts_with("HTTP/1.1 200 OK"));
+        client.shutdown().await.unwrap();
         drop(client);
         upstream_task.await.unwrap();
         shutdown.send(()).unwrap();
@@ -947,6 +1303,161 @@ mod tests {
         upstream_task.await.unwrap();
         shutdown.send(()).unwrap();
         assert_eq!(task.await.unwrap().unwrap().completed, 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_https_mode_returns_a_clear_proxy_error() {
+        let config = ProxyRuntimeConfig::http().with_https_mode(HttpsMode::Reject);
+        let (address, shutdown, task) = run_server(bind_server(config)).await;
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
+            .await
+            .unwrap();
+        let response = String::from_utf8(read_head(&mut client).await).unwrap();
+        assert!(response.starts_with("HTTP/1.1 403 HTTPS CONNECT Rejected"));
+        drop(client);
+        shutdown.send(()).unwrap();
+        assert_eq!(task.await.unwrap().unwrap().failed, 1);
+    }
+
+    #[tokio::test]
+    async fn https_interception_requires_explicit_client_trust() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let (upstream_config, upstream_certificate) = test_tls_server("127.0.0.1");
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream_listener.accept().await.unwrap();
+            let mut stream = TlsAcceptor::from(upstream_config)
+                .accept(stream)
+                .await
+                .unwrap();
+            let mut byte = [0_u8; 1];
+            let _ = stream.read(&mut byte).await;
+        });
+        let temporary = tempfile::tempdir().unwrap();
+        let (_authority, interception) =
+            test_tls_interception(temporary.path(), upstream_certificate);
+        let config = ProxyRuntimeConfig::http().with_tls_interception(interception);
+        let (address, shutdown, task) = run_server(bind_server(config)).await;
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {upstream_addr} HTTP/1.1\r\nHost: {upstream_addr}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_head(&mut client).await;
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 200"));
+
+        let roots = RootCertStore::empty();
+        let client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let server_name = ServerName::try_from("127.0.0.1".to_string()).unwrap();
+        let error = TlsConnector::from(Arc::new(client_config))
+            .connect(server_name, client)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().to_ascii_lowercase().contains("issuer"));
+
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!((stats.accepted, stats.completed, stats.failed), (1, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn trusted_https_is_forwarded_and_observed_as_plain_http() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let (upstream_config, upstream_certificate) = test_tls_server("127.0.0.1");
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream_listener.accept().await.unwrap();
+            let mut stream = TlsAcceptor::from(upstream_config)
+                .accept(stream)
+                .await
+                .unwrap();
+            let request = String::from_utf8(read_head(&mut stream).await).unwrap();
+            assert!(request.starts_with("GET /secure HTTP/1.1\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecure",
+                )
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let temporary = tempfile::tempdir().unwrap();
+        let (authority, interception) =
+            test_tls_interception(temporary.path(), upstream_certificate);
+        let (observer, mut receiver) = ObservationSink::channel(32);
+        let server = bind_server(ProxyRuntimeConfig::http().with_tls_interception(interception))
+            .with_observer(observer);
+        let (address, shutdown, task) = run_server(server).await;
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {upstream_addr} HTTP/1.1\r\nHost: {upstream_addr}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_head(&mut client).await;
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 200"));
+
+        let mut roots = RootCertStore::empty();
+        roots.add(authority.certificate_der()).unwrap();
+        let client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let server_name = ServerName::try_from("127.0.0.1".to_string()).unwrap();
+        let mut client = TlsConnector::from(Arc::new(client_config))
+            .connect(server_name, client)
+            .await
+            .unwrap();
+        client
+            .write_all(
+                b"GET /secure HTTP/1.1\r\nHost: local.test\r\nAuthorization: Bearer secret\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 200 OK"));
+        drop(client);
+
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        let stats = task.await.unwrap().unwrap();
+        let mut opened_as_http = false;
+        let mut client_data = Vec::new();
+        let mut server_data = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            match event.kind {
+                ObservationKind::Opened { protocol, .. } => {
+                    opened_as_http |= protocol.as_deref() == Some("http1");
+                }
+                ObservationKind::Data { direction, bytes } => match direction {
+                    Direction::ClientToServer => client_data.extend(bytes),
+                    Direction::ServerToClient => server_data.extend(bytes),
+                },
+                _ => {}
+            }
+        }
+        assert_eq!((stats.accepted, stats.completed, stats.failed), (1, 1, 0));
+        assert!(opened_as_http);
+        assert!(client_data.starts_with(b"GET /secure HTTP/1.1"));
+        assert!(server_data.starts_with(b"HTTP/1.1 200 OK"));
     }
 
     #[tokio::test]

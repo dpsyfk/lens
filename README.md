@@ -5,14 +5,20 @@ The Blueprint - **TraceFlow**
 ## Development preview
 
 The current preview runs as an explicit HTTP proxy. It accepts absolute-form
-HTTP/1 requests, supports `CONNECT` passthrough, and can also forward every
-connection to one fixed TCP target. HTTP/1 requests and responses are decoded
+HTTP/1 requests, intercepts HTTPS `CONNECT` after an explicit local-CA trust
+step, and can also forward every connection to one fixed TCP target. HTTP/1
+requests and responses are decoded
 incrementally, including fragmented, fixed-length, chunked, close-delimited,
 keep-alive, and pipelined messages.
 
 ```sh
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless
 curl --proxy http://127.0.0.1:8888 http://example.com/
+
+# Create the user-scoped CA and install only its public certificate.
+cargo run -p lens-cli -- cert install
+HTTPS_PROXY=http://127.0.0.1:8888 curl https://example.com/
+cargo run -p lens-cli -- cert status
 
 # Keep at most 64 KiB of each body; secrets remain redacted in JSONL output.
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless --max-body 65536
@@ -21,12 +27,23 @@ cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --headless --max-body 65536
 cargo run -p lens-cli -- run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
 ```
 
-`CONNECT` is tunnel-only in this preview. Certificate generation and HTTPS
-inspection arrive in the TLS milestone. Observations are bounded and may be
-dropped under load rather than slowing forwarded application traffic. Stored
-HTTP records mask authorization, cookies, common secret headers, sensitive
-query/form fields, and JSON secret values by default. `--reveal` is an explicit
-local opt-in and marks captured message records as secret.
+`CONNECT` defaults to explicit-trust HTTPS inspection. Use `--https
+passthrough` for certificate-pinned clients or intentionally opaque tunnels,
+or `--https reject` to prohibit tunnels. `lens cert uninstall` removes trust but
+retains the local CA files so reinstalling does not silently change identity.
+Observations are bounded and may be dropped under load rather than slowing
+forwarded application traffic. Stored HTTP records mask authorization, cookies,
+common secret headers, sensitive query/form fields, and JSON secret values by
+default. `--reveal` is an explicit local opt-in and marks captured message
+records as secret.
+
+On Linux, `cert install` targets the current user's NSS database when
+`certutil` is available and also writes a merged system-plus-Lens client bundle.
+OpenSSL-based tools such as many `curl` builds can use the `client_bundle` path
+reported by `lens cert status` through `SSL_CERT_FILE`, without root access.
+Node, Java, and language-specific runtimes may require their corresponding
+extra-CA setting. Certificate-pinned applications must use `--https
+passthrough` or disable pinning in their development configuration.
 
 
 ### Vision

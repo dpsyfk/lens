@@ -5,18 +5,22 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use lens_core::RunId;
+use lens_platform::{PlatformKind, TrustState, UserTrustStore};
 use lens_proxy::{
-    ListenerConfig, ObservationSink, ProxyListener, ProxyMode as ProxyListenMode,
-    ProxyRuntimeConfig, ProxyServer,
+    HttpsMode, ListenerConfig, ObservationSink, ProxyListener, ProxyMode as ProxyListenMode,
+    ProxyRuntimeConfig, ProxyServer, TlsInterception,
 };
 use lens_store::StoreActor;
+use lens_tls::{CaPaths, CaStatus, CertificateAuthority};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8888";
 const DEFAULT_MODE: ProxyMode = ProxyMode::Explicit;
 const DEFAULT_MAX_FLOWS: usize = 10_000;
 const DEFAULT_MAX_BODY: usize = 262_144;
+const DEFAULT_HTTPS_MODE: HttpsMode = HttpsMode::Intercept;
 
 fn main() -> ExitCode {
     let _ = tracing_subscriber::fmt().with_target(false).try_init();
@@ -72,6 +76,7 @@ where
     match parsed.command {
         Command::Run => run_proxy_session(&config, bind_listener),
         Command::Doctor { check } => Ok(render_doctor_report(&config, check)),
+        Command::Cert { action } => run_cert_command(action, bind_listener),
         Command::Help | Command::Version => unreachable!("handled before configuration"),
     }
 }
@@ -102,9 +107,23 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         .enable_all()
         .build()
         .map_err(|error| CliError::RuntimeFailed(error.to_string()))?;
-    let runtime_config = config
-        .upstream_addr
-        .map_or_else(ProxyRuntimeConfig::http, ProxyRuntimeConfig::new);
+    let runtime_config = match config.upstream_addr {
+        Some(upstream) => ProxyRuntimeConfig::new(upstream),
+        None => match config.https_mode {
+            HttpsMode::Intercept => {
+                let paths = CaPaths::for_user()
+                    .map_err(|error| CliError::Certificate(error.to_string()))?;
+                let authority = Arc::new(
+                    CertificateAuthority::load_or_create(paths)
+                        .map_err(|error| CliError::Certificate(error.to_string()))?,
+                );
+                let interception = TlsInterception::with_platform_verifier(authority)
+                    .map_err(|error| CliError::Certificate(error.to_string()))?;
+                ProxyRuntimeConfig::http().with_tls_interception(interception)
+            }
+            mode => ProxyRuntimeConfig::http().with_https_mode(mode),
+        },
+    };
     let (observer, observations) = ObservationSink::channel(1024);
     let (store_actor, store_handle) = StoreActor::with_inspection(
         config.max_flows,
@@ -156,6 +175,95 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
     Ok(output)
 }
 
+fn run_cert_command(action: CertAction, execute: bool) -> Result<String, CliError> {
+    let paths = CaPaths::for_user().map_err(|error| CliError::Certificate(error.to_string()))?;
+    if !execute {
+        return Ok(format!(
+            "lens cert {action}\ncertificate: {}\nstatus: dry-run; no trust-store changes made",
+            paths.certificate.display()
+        ));
+    }
+    let trust = UserTrustStore::current().map_err(|error| CliError::Trust(error.to_string()))?;
+    match action {
+        CertAction::Install => {
+            let authority = CertificateAuthority::load_or_create(paths)
+                .map_err(|error| CliError::Certificate(error.to_string()))?;
+            let linux_bundle = if trust.platform() == PlatformKind::Linux {
+                Some(
+                    authority
+                        .write_linux_client_bundle()
+                        .map_err(|error| CliError::Certificate(error.to_string()))?
+                        .to_path_buf(),
+                )
+            } else {
+                None
+            };
+            let (trust_state, trust_detail) = match trust.install(authority.certificate_path()) {
+                Ok(report) => (report.state, report.detail),
+                Err(error) if trust.platform() == PlatformKind::Linux => (
+                    TrustState::Unavailable,
+                    format!(
+                        "NSS installation unavailable ({error}); use SSL_CERT_FILE={} for OpenSSL-based clients",
+                        linux_bundle
+                            .as_deref()
+                            .expect("Linux bundle created above")
+                            .display()
+                    ),
+                ),
+                Err(error) => return Err(CliError::Trust(error.to_string())),
+            };
+            Ok(format!(
+                "lens cert install\nmaterial: ready\ncertificate: {}\nfingerprint: {}\nclient_bundle: {}\ntrust: {}; {}",
+                authority.certificate_path().display(),
+                authority.status().fingerprint.unwrap_or_default(),
+                linux_bundle
+                    .as_deref()
+                    .map_or("not required".to_string(), |path| path.display().to_string()),
+                trust_state,
+                trust_detail
+            ))
+        }
+        CertAction::Uninstall => {
+            let (trust_state, trust_detail) = match trust.uninstall() {
+                Ok(report) => (report.state, report.detail),
+                Err(error) if trust.platform() == PlatformKind::Linux => (
+                    TrustState::Unavailable,
+                    format!(
+                        "NSS removal unavailable ({error}); unset SSL_CERT_FILE to remove environment trust"
+                    ),
+                ),
+                Err(error) => return Err(CliError::Trust(error.to_string())),
+            };
+            Ok(format!(
+                "lens cert uninstall\ntrust: {}; {}\nmaterial: retained; the local CA key was not deleted",
+                trust_state, trust_detail
+            ))
+        }
+        CertAction::Status => {
+            let material = CaStatus::inspect(paths);
+            let report = trust.status();
+            Ok(render_cert_status(&material, report.state, &report.detail))
+        }
+    }
+}
+
+fn render_cert_status(material: &CaStatus, trust: TrustState, trust_detail: &str) -> String {
+    format!(
+        "lens cert status\nmaterial: {}; {}\ncertificate: {}\nclient_bundle: {} ({})\nfingerprint: {}\nvalid_now: {}\ntrust: {}; {}",
+        material.state,
+        material.detail,
+        material.paths.certificate.display(),
+        material.paths.client_bundle.display(),
+        if material.paths.client_bundle.is_file() { "ready" } else { "not-created" },
+        material.fingerprint.as_deref().unwrap_or("unavailable"),
+        material
+            .valid_now
+            .map_or("unknown", |value| if value { "yes" } else { "no" }),
+        trust,
+        trust_detail
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cli {
     command: Command,
@@ -184,6 +292,13 @@ impl Cli {
                         check: DoctorCheck::All,
                     },
                 )?,
+                "cert" => {
+                    let action = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("cert action".to_string()))?
+                        .parse()?;
+                    set_command(&mut command, Command::Cert { action })?;
+                }
                 "--check" => {
                     let value = args
                         .next()
@@ -215,6 +330,12 @@ impl Cli {
                         .next()
                         .ok_or_else(|| CliError::MissingValue("--mode".to_string()))?;
                     flags.mode = Some(value.parse()?);
+                }
+                "--https" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("--https".to_string()))?;
+                    flags.https_mode = Some(parse_https_mode(&value)?);
                 }
                 "--reveal" => flags.reveal = Some(true),
                 "--redact" => flags.reveal = Some(false),
@@ -271,8 +392,43 @@ fn set_command(target: &mut Option<Command>, command: Command) -> Result<(), Cli
 enum Command {
     Run,
     Doctor { check: DoctorCheck },
+    Cert { action: CertAction },
     Help,
     Version,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CertAction {
+    Install,
+    Uninstall,
+    Status,
+}
+
+impl fmt::Display for CertAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Install => "install",
+            Self::Uninstall => "uninstall",
+            Self::Status => "status",
+        })
+    }
+}
+
+impl std::str::FromStr for CertAction {
+    type Err = CliError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "install" => Ok(Self::Install),
+            "uninstall" => Ok(Self::Uninstall),
+            "status" => Ok(Self::Status),
+            _ => Err(CliError::InvalidValue {
+                name: "cert action".to_string(),
+                value: value.to_string(),
+                expected: "install, uninstall, or status".to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -339,6 +495,7 @@ struct ConfigValues {
     listen: Option<String>,
     upstream: Option<String>,
     mode: Option<ProxyMode>,
+    https_mode: Option<HttpsMode>,
     reveal: Option<bool>,
     max_flows: Option<usize>,
     max_body: Option<usize>,
@@ -353,6 +510,9 @@ impl ConfigValues {
             mode: env_vars
                 .get("LENS_MODE")
                 .and_then(|value| value.parse().ok()),
+            https_mode: env_vars
+                .get("LENS_HTTPS")
+                .and_then(|value| parse_https_mode(value).ok()),
             reveal: env_vars
                 .get("LENS_REVEAL")
                 .and_then(|value| parse_bool(value).ok()),
@@ -376,6 +536,7 @@ struct ResolvedConfig {
     upstream: Option<String>,
     upstream_addr: Option<SocketAddr>,
     mode: ProxyMode,
+    https_mode: HttpsMode,
     reveal: bool,
     max_flows: usize,
     max_body: usize,
@@ -424,6 +585,12 @@ impl ResolvedConfig {
                 env_vars.and_then(|values| values.mode),
                 file.and_then(|values| values.mode),
                 DEFAULT_MODE,
+            ),
+            https_mode: pick(
+                flags.and_then(|values| values.https_mode),
+                env_vars.and_then(|values| values.https_mode),
+                file.and_then(|values| values.https_mode),
+                DEFAULT_HTTPS_MODE,
             ),
             reveal: pick(
                 flags.and_then(|values| values.reveal),
@@ -485,6 +652,7 @@ fn parse_config_file(contents: &str) -> ConfigValues {
             "listen" => values.listen = Some(value.to_string()),
             "upstream" => values.upstream = Some(value.to_string()),
             "mode" => values.mode = value.parse().ok(),
+            "https" => values.https_mode = parse_https_mode(value).ok(),
             "reveal" => values.reveal = parse_bool(value).ok(),
             "max_flows" => values.max_flows = parse_positive_usize(key, value).ok(),
             "max_body" => values.max_body = parse_positive_usize(key, value).ok(),
@@ -508,6 +676,19 @@ fn parse_bool(value: &str) -> Result<bool, CliError> {
     }
 }
 
+fn parse_https_mode(value: &str) -> Result<HttpsMode, CliError> {
+    match value {
+        "intercept" => Ok(HttpsMode::Intercept),
+        "passthrough" => Ok(HttpsMode::Passthrough),
+        "reject" => Ok(HttpsMode::Reject),
+        _ => Err(CliError::InvalidValue {
+            name: "--https".to_string(),
+            value: value.to_string(),
+            expected: "intercept, passthrough, or reject".to_string(),
+        }),
+    }
+}
+
 fn parse_positive_usize(name: &str, value: &str) -> Result<usize, CliError> {
     let parsed = value.parse::<usize>().map_err(|_| CliError::InvalidValue {
         name: name.to_string(),
@@ -526,13 +707,14 @@ fn parse_positive_usize(name: &str, value: &str) -> Result<usize, CliError> {
 
 fn render_run_plan(config: &ResolvedConfig) -> String {
     format!(
-        "lens run\nmode: {}\nlisten: {}\nupstream: {}\nredaction: {}\nheadless: {}\nmax_flows: {}\nmax_body: {} bytes",
+        "lens run\nmode: {}\nlisten: {}\nupstream: {}\nhttps: {}\nredaction: {}\nheadless: {}\nmax_flows: {}\nmax_body: {} bytes",
         config.mode,
         config.listen,
         config
             .upstream
             .as_deref()
             .unwrap_or("selected from HTTP request"),
+        config.https_mode,
         if config.reveal { "revealed" } else { "enabled" },
         config.headless,
         config.max_flows,
@@ -546,9 +728,10 @@ fn render_doctor_report(config: &ResolvedConfig, check: DoctorCheck) -> String {
 
     if matches!(check, DoctorCheck::All | DoctorCheck::Config) {
         lines.push(format!(
-            "config: ok; mode={}, listen={}, redaction={}",
+            "config: ok; mode={}, listen={}, https={}, redaction={}",
             config.mode,
             config.listen,
+            config.https_mode,
             if config.reveal { "revealed" } else { "enabled" }
         ));
     }
@@ -563,10 +746,28 @@ fn render_doctor_report(config: &ResolvedConfig, check: DoctorCheck) -> String {
         ));
     }
     if matches!(check, DoctorCheck::All | DoctorCheck::Trust) {
-        lines.push(
-            "trust: not installed; run `lens cert install` once certificate management lands"
-                .to_string(),
-        );
+        let material = CaPaths::for_user()
+            .map(CaStatus::inspect)
+            .map(|status| {
+                format!(
+                    "material={}, valid_now={}, client_bundle={}",
+                    status.state,
+                    status
+                        .valid_now
+                        .map_or("unknown", |value| if value { "yes" } else { "no" }),
+                    if status.paths.client_bundle.is_file() {
+                        status.paths.client_bundle.display().to_string()
+                    } else {
+                        "not-created".to_string()
+                    }
+                )
+            })
+            .unwrap_or_else(|error| format!("material=unavailable ({error})"));
+        let trust = UserTrustStore::current()
+            .map(|store| store.status())
+            .map(|report| format!("{}; {}", report.state, report.detail))
+            .unwrap_or_else(|error| format!("unavailable; {error}"));
+        lines.push(format!("trust: {trust}; {material}"));
     }
     if matches!(check, DoctorCheck::All | DoctorCheck::Platform) {
         lines.push(format!(
@@ -604,6 +805,8 @@ enum CliError {
     },
     RuntimeFailed(String),
     ProxyFailed(String),
+    Certificate(String),
+    Trust(String),
 }
 
 impl fmt::Display for CliError {
@@ -641,6 +844,8 @@ impl fmt::Display for CliError {
             }
             Self::RuntimeFailed(source) => write!(f, "lens: failed to start runtime: {source}"),
             Self::ProxyFailed(source) => write!(f, "lens: proxy session failed: {source}"),
+            Self::Certificate(source) => write!(f, "lens: certificate operation failed: {source}"),
+            Self::Trust(source) => write!(f, "lens: trust-store operation failed: {source}"),
         }
     }
 }
@@ -655,6 +860,7 @@ USAGE:
 COMMANDS:
   run        Start a live capture session (default)
   doctor     Check config, platform, trust, and network readiness
+  cert       Manage the explicit local CA: install, uninstall, or status
 
 GLOBAL OPTIONS:
   --config <path>            Read simple key = value configuration
@@ -662,6 +868,8 @@ GLOBAL OPTIONS:
   --upstream <addr:port>     Optional fixed TCP target; omit for HTTP proxy mode
   --mode <explicit|transparent>
                              How traffic reaches Lens [default: explicit]
+  --https <intercept|passthrough|reject>
+                             CONNECT behavior [default: intercept]
   --reveal                   Disable redaction for this run
   --redact                   Force redaction on
   --headless                 Run without the TUI
@@ -672,6 +880,8 @@ GLOBAL OPTIONS:
 
 EXAMPLES:
   lens
+  lens cert install
+  lens cert status
   HTTP_PROXY=http://127.0.0.1:8888 lens run --headless
   lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
   lens doctor --check all
@@ -692,6 +902,7 @@ mod tests {
         assert!(output.starts_with("lens run"));
         assert!(output.contains("mode: explicit"));
         assert!(output.contains("listen: 127.0.0.1:8888"));
+        assert!(output.contains("https: intercept"));
         assert!(output.contains("redaction: enabled"));
     }
 
@@ -712,6 +923,8 @@ mod tests {
                 "127.0.0.1:8080",
                 "--mode",
                 "explicit",
+                "--https",
+                "passthrough",
                 "--reveal",
                 "--headless",
                 "--max-flows",
@@ -739,6 +952,7 @@ max_body = 64
         assert!(output.contains("listen: 127.0.0.1:9999"));
         assert!(output.contains("upstream: 127.0.0.1:8080"));
         assert!(output.contains("mode: explicit"));
+        assert!(output.contains("https: passthrough"));
         assert!(output.contains("redaction: revealed"));
         assert!(output.contains("headless: true"));
         assert!(output.contains("max_flows: 25"));
@@ -805,7 +1019,8 @@ max_body = 64
         assert!(output.contains("lens doctor"));
         assert!(output.contains("config: ok"));
         assert!(output.contains("network: ok; bind address 127.0.0.1:8888"));
-        assert!(output.contains("trust: not installed"));
+        assert!(output.contains("trust:"));
+        assert!(output.contains("material="));
         assert!(output.contains("platform:"));
     }
 
@@ -820,6 +1035,29 @@ max_body = 64
         .unwrap();
 
         assert!(output.contains("upstream: selected from HTTP request"));
+        assert!(output.contains("https: intercept"));
+    }
+
+    #[test]
+    fn certificate_commands_have_a_non_mutating_dry_run() {
+        let output = run(vec!["cert", "install"], &empty_env(), |_| Ok(None), false).unwrap();
+
+        assert!(output.starts_with("lens cert install"));
+        assert!(output.contains("dry-run; no trust-store changes made"));
+    }
+
+    #[test]
+    fn invalid_certificate_action_is_rejected() {
+        let error = run(vec!["cert", "rotate"], &empty_env(), |_| Ok(None), false).unwrap_err();
+
+        assert_eq!(
+            error,
+            CliError::InvalidValue {
+                name: "cert action".to_string(),
+                value: "rotate".to_string(),
+                expected: "install, uninstall, or status".to_string(),
+            }
+        );
     }
 
     #[test]
