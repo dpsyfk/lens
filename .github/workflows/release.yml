@@ -9,6 +9,7 @@ on:
       - "docs/INSTALL.md"
       - "docs/UPGRADING.md"
       - "scripts/package-release.py"
+      - "scripts/release-smoke.py"
       - "scripts/verify-release.py"
       - "scripts/check-versions.py"
       - ".github/workflows/release.yml"
@@ -138,13 +139,8 @@ jobs:
           binary="target/${{ matrix.target }}/release/${{ matrix.binary }}"
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$binary"
           codesign --verify --strict --verbose=2 "$binary"
-      - name: Smoke-test binary
-        shell: bash
-        run: |
-          binary="target/${{ matrix.target }}/release/${{ matrix.binary }}"
-          "$binary" --version
-          "$binary" quickstart | grep -F "lens doctor"
-          "$binary" doctor --check config | grep -F "doctor"
+      - name: Smoke-test binary and real HTTP forwarding
+        run: python scripts/release-smoke.py --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}"
       - name: Package deterministic archive
         shell: bash
         run: |

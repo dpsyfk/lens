@@ -26,6 +26,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Compile release helpers
         run: python -m py_compile scripts/*.py
+      - name: Check release smoke harness help
+        run: python scripts/release-smoke.py --help
       - name: Check workspace release version
         run: python scripts/check-versions.py
       - name: Prove deterministic archives and expected contents

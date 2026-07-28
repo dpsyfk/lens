@@ -22,7 +22,14 @@ else:
 
 basenames = {Path(name).name for name in names}
 binary_names = {"lens", "lens.exe"}
-required = {"README.md", "LICENSE", "INSTALL.md", "UPGRADING.md"}
+required = {
+    "README.md",
+    "LICENSE",
+    "INSTALL.md",
+    "UPGRADING.md",
+    "QUICKSTART.md",
+    "TROUBLESHOOTING.md",
+}
 if not basenames.intersection(binary_names):
     raise SystemExit("release archive does not contain the Lens binary")
 missing = required - basenames

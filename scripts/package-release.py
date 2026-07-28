@@ -36,6 +36,8 @@ def inputs(binary: Path) -> list[tuple[Path, str, int]]:
         (Path("LICENSE"), "LICENSE", regular),
         (Path("docs/INSTALL.md"), "INSTALL.md", regular),
         (Path("docs/UPGRADING.md"), "UPGRADING.md", regular),
+        (Path("docs/src/quickstart.md"), "QUICKSTART.md", regular),
+        (Path("docs/src/troubleshooting.md"), "TROUBLESHOOTING.md", regular),
     ]
 
 
