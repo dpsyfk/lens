@@ -375,9 +375,9 @@ fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     let regions = Layout::default()
         .direction(LayoutDirection::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(2),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(2),
         ])
         .split(frame.area());
     let content = Layout::default()
@@ -385,38 +385,36 @@ fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(regions[1]);
 
-    let redaction = if app.reveal {
-        Span::styled(
-            "REVEAL MODE",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Red)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(
-            "SAFE REDACTION",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(" Lens ", Style::default().add_modifier(Modifier::BOLD)),
-        redaction,
-        Span::raw(format!(
-            "  retained={} evicted={} dropped={}",
-            app.snapshot.flows.len(),
-            app.snapshot.evicted,
-            app.dropped
-        )),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Live developer traffic"),
+    // Keep the default presentation quiet so Lens reads naturally alongside
+    // application logs instead of looking like a high-saturation dashboard.
+    let redaction = Span::styled(
+        if app.reveal {
+            "reveal enabled"
+        } else {
+            "redaction on"
+        },
+        Style::default()
+            .fg(if app.reveal {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            })
+            .add_modifier(Modifier::BOLD),
     );
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled("lens", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("  live traffic  ", Style::default().fg(Color::DarkGray)),
+        redaction,
+        Span::styled(
+            format!(
+                "  ·  {} retained  ·  {} evicted  ·  {} dropped",
+                app.snapshot.flows.len(),
+                app.snapshot.evicted,
+                app.dropped
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
     frame.render_widget(header, regions[0]);
 
     let visible = app.visible_indices();
@@ -452,44 +450,34 @@ fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     )
     .header(
         Row::new(["id", "protocol", "state", "route", "latency"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+            .style(Style::default().fg(Color::DarkGray)),
     )
-    .block(Block::default().borders(Borders::ALL).title(format!(
-        "Flows {}/{}",
+    .block(Block::default().borders(Borders::TOP).title(format!(
+        " flows {}/{} ",
         visible.len(),
         app.snapshot.flows.len()
     )))
-    .row_highlight_style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("> ");
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+    .highlight_symbol("› ");
     let mut state =
         TableState::default().with_selected((!visible.is_empty()).then_some(app.selected));
     frame.render_stateful_widget(table, content[0], &mut state);
 
     let inspector = Paragraph::new(inspector_text(app.selected_flow()))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Flow inspector"),
-        )
+        .block(Block::default().borders(Borders::TOP).title(" inspector "))
         .wrap(Wrap { trim: false })
         .scroll((app.inspector_scroll, 0));
     frame.render_widget(inspector, content[1]);
 
     let prompt = if app.search_mode {
-        format!("search: {}_  Enter/Esc finish", app.filter.search)
+        format!("/ {}_  Enter to finish · Esc to cancel", app.filter.search)
     } else {
         format!(
-            "{}  |  j/k select  PgUp/PgDn inspect  p protocol  s status  l latency  / search  x clear  q quit",
+            "{}  ·  j/k move  PgUp/PgDn scroll  p protocol  s state  l latency  / find  x clear  q quit",
             app.filter.summary()
         )
     };
-    let footer =
-        Paragraph::new(prompt).block(Block::default().borders(Borders::ALL).title("Controls"));
+    let footer = Paragraph::new(prompt).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, regions[2]);
 }
 
@@ -513,13 +501,13 @@ fn inspector_text(flow: Option<&StoredFlow>) -> Text<'static> {
     if let Some(failure) = &flow.failure {
         lines.push(Line::from(Span::styled(
             format!("failure: {}", sanitize(failure, 1024)),
-            Style::default().fg(Color::Red),
+            Style::default().add_modifier(Modifier::BOLD),
         )));
     }
     if let Some(error) = &flow.decoder_error {
         lines.push(Line::from(Span::styled(
             format!("decoder: {}", sanitize(error, 1024)),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(Color::DarkGray),
         )));
     }
     lines.push(Line::from(""));
@@ -559,7 +547,7 @@ fn inspector_text(flow: Option<&StoredFlow>) -> Text<'static> {
         remaining_chars = remaining_chars.saturating_sub(summary.chars().count());
         lines.push(Line::from(Span::styled(
             format!("[{direction}] {summary}{latency}{flags}"),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default(),
         )));
         let body = sanitize(
             &String::from_utf8_lossy(&message.body),
@@ -702,8 +690,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("SAFE REDACTION"));
-        assert!(rendered.contains("dropped=4"));
+        assert!(rendered.contains("redaction on"));
+        assert!(rendered.contains("4 dropped"));
         assert!(rendered.contains("postgres"));
         assert!(rendered.contains("Query"));
     }
@@ -721,6 +709,6 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("REVEAL MODE"));
+        assert!(rendered.contains("reveal enabled"));
     }
 }

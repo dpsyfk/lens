@@ -1,0 +1,45 @@
+name: v1 dogfood report
+description: Record a cross-platform release-candidate verification result.
+title: "[Dogfood]: "
+body:
+  - type: markdown
+    attributes:
+      value: Complete this report using a binary downloaded from the draft release. Do not attach secret or reveal-mode exports.
+  - type: input
+    id: release
+    attributes:
+      label: Release tag and artifact
+      placeholder: v0.1.0 / lens-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS version, CPU architecture, terminal, and shell.
+    validations:
+      required: true
+  - type: checkboxes
+    id: gates
+    attributes:
+      label: Release gates
+      options:
+        - label: Artifact signature and checksum verification passed.
+          required: true
+        - label: First-run commands and TUI terminal restoration passed.
+          required: true
+        - label: HTTP forwarding, inspection, and redaction passed.
+          required: true
+        - label: HTTPS trust, interception, redaction, and trust removal passed.
+          required: true
+        - label: PostgreSQL forwarding, inspection, and redaction passed.
+          required: true
+        - label: Fault and overload checks did not block application traffic or terminate Lens.
+          required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and observations
+      description: Link redacted logs, diagnostics, and blocking issues. Never attach reveal-mode exports.
+    validations:
+      required: true

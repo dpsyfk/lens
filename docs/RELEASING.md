@@ -25,6 +25,7 @@ Linux and archive signatures use GitHub OIDC with Sigstore keyless signing, so n
 3. Run `cargo fmt --all --check`, warnings-as-errors clippy, and all workspace tests.
 4. Run the Release workflow manually once. Dispatch builds are intentionally unsigned and unpublished, but they validate compilation, deterministic packaging, smoke tests, and repeat-build equality.
 5. Confirm both native certificates are valid beyond the planned release date and the timestamp/notarization services are reachable.
+6. Open one dogfood report per release target from the repository issue template and assign independent testers. Follow [the dogfood protocol](DOGFOODING.md).
 
 ## Cut the release
 
@@ -37,7 +38,7 @@ git push origin v0.1.0
 
 The tag workflow builds locked binaries for Windows x64, macOS Intel and Apple silicon, and Linux x64; verifies native signatures and notarization; smoke-tests and packages each binary; compares two Linux builds; emits checksums and Sigstore bundles; and creates a draft GitHub release.
 
-Inspect the draft assets, independently verify at least one archive per OS, and publish the draft only after the checks pass. Release tags are immutable; correct a bad release with a new patch version rather than moving a published tag.
+Inspect the draft assets and complete the dogfood protocol using the downloaded artifacts. Link passing reports for Windows x64, macOS Intel, macOS Apple silicon, and Linux x64 from the draft release. Publish the draft only after every automated check and dogfood release gate passes. Release tags are immutable; correct a bad release with a new patch version rather than moving a published tag.
 
 ## Failure and credential response
 
