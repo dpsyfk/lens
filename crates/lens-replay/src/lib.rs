@@ -17,6 +17,8 @@ const MAX_REPLAY_BODY_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 const REDACTED: &str = "[REDACTED]";
 
+type HeaderList = Vec<(String, String)>;
+
 /// One-based flow and request selection inside a capture.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplaySelection {
@@ -438,6 +440,11 @@ fn parse_request_line(summary: &str) -> Result<(String, String), ReplayError> {
         let uri = target
             .parse::<Uri>()
             .map_err(|_| ReplayError::new("captured request target is invalid"))?;
+        if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.authority().is_none() {
+            return Err(ReplayError::new(
+                "captured request is not an origin-form or absolute-form HTTP request",
+            ));
+        }
         uri.path_and_query()
             .map(|value| value.as_str().to_string())
             .ok_or_else(|| ReplayError::new("captured request has no path"))?
@@ -450,7 +457,7 @@ fn parse_request_line(summary: &str) -> Result<(String, String), ReplayError> {
     Ok((method.to_string(), path_and_query))
 }
 
-fn parse_wire(wire: &[u8]) -> Result<(Vec<(String, String)>, Vec<u8>), ReplayError> {
+fn parse_wire(wire: &[u8]) -> Result<(HeaderList, Vec<u8>), ReplayError> {
     let boundary = find_bytes(wire, b"\r\n\r\n")
         .ok_or_else(|| ReplayError::new("captured message has no header/body boundary"))?;
     let head = std::str::from_utf8(&wire[..boundary])
@@ -764,7 +771,7 @@ mod tests {
             .to_string()
             .contains("legacy"));
 
-        let input = capture("GET", b"\r\npartial", "public")
+        let input = capture("GET", b"\r\n\r\npartial", "public")
             .replace("\"truncated\":false", "\"truncated\":true");
         let plan = parse_plan(input.as_bytes(), ReplaySelection::new(None, 1).unwrap()).unwrap();
         assert!(plan
