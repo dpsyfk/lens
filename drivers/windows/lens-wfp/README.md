@@ -1,0 +1,28 @@
+# Lens Windows WFP driver
+
+This directory contains the first-party kernel component for Windows transparent TCP capture. It is intentionally small: the driver redirects selected outbound connections to the ordinary Lens process and attaches a fixed-width original-destination context. HTTP, TLS, PostgreSQL, redaction, storage, exports, and rendering remain outside the kernel.
+
+## Security boundary
+
+- The control device grants access only to Local System and built-in administrators.
+- Every IOCTL uses `METHOD_BUFFERED`, fixed-width records, explicit size checks, and ABI version 1.
+- Records contain no user pointers, command lines, credentials, or payload bytes.
+- The configured Lens PID is excluded to prevent its upstream sockets from being redirected recursively.
+- An unconfigured driver permits traffic. Allocation or redirect failure also permits the original connection and increments the error counter.
+- Loading, configuring, or removing the driver always requires an explicit elevated action.
+
+The runtime callouts alone do not affect traffic. A later user-space control layer must transactionally register the corresponding WFP provider, sublayer, callouts, and narrowly scoped filters before configuration can become active.
+
+## Build
+
+Install Visual Studio 2022 with the Desktop C++ workload and the Windows 11 WDK, then run from a Developer PowerShell:
+
+```powershell
+msbuild .\LensWfp.sln /p:Configuration=Release /p:Platform=x64
+```
+
+The resulting `.sys`, `.inf`, and generated catalog are development artifacts. Do not distribute or install them as a public Lens release until the catalog has passed Microsoft driver signing and the signed package has passed Driver Verifier and clean-machine install/uninstall tests.
+
+## ABI changes
+
+`include/lens_wfp_shared.h` mirrors the records in `lens-platform::transparent`. Any binary layout change must increment `LENS_WFP_ABI_VERSION`, retain a clear mismatch diagnostic, and update both sides in the same pull request.

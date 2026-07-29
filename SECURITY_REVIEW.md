@@ -51,9 +51,14 @@ The review assumes the product intentionally handles decrypted traffic in a loca
 - protocol detection confidence thresholds
 - fail closed when trust state is invalid
 - separate forwarding from observability so inspection failure does not block forwarding
+- keep privileged redirectors payload-blind and version their pointer-free control records
+- restrict the Windows control device to Local System and administrators
+- exclude Lens upstream sockets and require a nonzero session generation to prevent redirect loops and stale activation
+- permit the original connection if the redirector is unconfigured or encounters an internal failure
 
 #### Residual risk
 - any parser that reads arbitrary network bytes remains a target for denial of service and crash bugs.
+- a kernel redirector defect can affect the entire host, so signed-driver review, Driver Verifier, and clean-machine rollback tests remain release gates.
 
 ### 2. MITM and certificate handling
 #### Surface

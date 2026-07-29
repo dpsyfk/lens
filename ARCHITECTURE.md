@@ -5,14 +5,14 @@ Lens is a local-first, proxy-first observability tool. The default product obser
 
 The central design goal is simple: forwarding must stay fast and reliable even when inspection, storage, decoding, or the UI fall behind.
 
-This document contains both implemented architecture and deliberately marked extension seams. The current implementation supports the explicit proxy path, HTTP/1 and PostgreSQL decoders, TLS interception, redaction, bounded storage, TUI, exports, and guarded HTTP replay. Transparent interception, process/service identity, plugins, and eBPF discovery are planned and are not current product capabilities.
+This document contains both implemented architecture and deliberately marked extension seams. The current implementation supports the explicit proxy path, HTTP/1 and PostgreSQL decoders, TLS interception, redaction, bounded storage, TUI, exports, guarded HTTP replay, and process/service identity. Transparent interception has a versioned platform contract plus a first-party Windows WFP driver foundation, but native filter activation and original-destination forwarding are not current product capabilities. Plugins and eBPF discovery remain planned.
 
 ## Internal Event Pipeline
 ### Decision
 The hot path is a one-way pipeline:
 
 - accept the connection
-- classify it as explicit proxy traffic (transparent interception is a planned adapter)
+- classify it as explicit proxy traffic (native transparent adapters are under development)
 - resolve the upstream target
 - establish or reuse TLS locally when required
 - mirror bytes into an observation tap
@@ -58,7 +58,7 @@ The codebase is split by responsibility:
 - `lens-redact` for masking and reveal controls
 - `lens-replay` for bounded capture loading, replay safety policy, execution, and comparison
 - `lens-store` for bounded flow storage, indexing, and snapshots
-- `lens-platform` for OS-specific trust plus planned identity and redirection seams
+- `lens-platform` for OS-specific trust, process identity, and versioned transparent-redirection seams
 - `lens-tui` for rendering and input handling
 - `lens-cli` for startup, config resolution, and composition
 - `lens-plugin` as a placeholder for the planned sandboxed extension host
@@ -153,7 +153,7 @@ Dependencies are passed in through constructors. The CLI is the composition root
 
 ## Extension Points
 ### Decision
-The implemented system exposes seams for protocol decoders, redaction, exports, replay, and platform trust adapters. Identity providers, transparent redirection, discovery backends, and plugins are planned extension points. The default build works without external extensions, and later capabilities should remain additive rather than invasive.
+The implemented system exposes seams for protocol decoders, redaction, exports, replay, platform trust, process identity, and native redirection control records. Windows WFP source is isolated under `drivers/windows`; Linux nftables and macOS PF adapters, redirect activation, discovery backends, and plugins remain extension work. The default build works without privileged extensions, and later capabilities should remain additive rather than invasive.
 
 ### Trade-offs
 - More seams mean more versioning and compatibility discipline.

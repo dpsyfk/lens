@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lens_core::{Endpoint, RunId};
-use lens_platform::{PlatformKind, ProcessResolver, TrustState, UserTrustStore};
+use lens_platform::{
+    PlatformKind, ProcessResolver, TransparentController, TrustState, UserTrustStore,
+};
 use lens_proxy::{
     FlowIdentityLookup, HttpsMode, ListenerConfig, ObservationSink, ProxyListener,
     ProxyMode as ProxyListenMode, ProxyRuntimeConfig, ProxyServer, TlsInterception,
@@ -792,6 +794,7 @@ enum DoctorCheck {
     Network,
     Trust,
     Platform,
+    Transparent,
 }
 
 impl std::str::FromStr for DoctorCheck {
@@ -804,10 +807,11 @@ impl std::str::FromStr for DoctorCheck {
             "network" => Ok(Self::Network),
             "trust" => Ok(Self::Trust),
             "platform" => Ok(Self::Platform),
+            "transparent" => Ok(Self::Transparent),
             _ => Err(CliError::InvalidValue {
                 name: "--check".to_string(),
                 value: value.to_string(),
-                expected: "all, config, network, trust, or platform".to_string(),
+                expected: "all, config, network, trust, platform, or transparent".to_string(),
             }),
         }
     }
@@ -1327,6 +1331,20 @@ fn render_doctor_report(config: &ResolvedConfig, check: DoctorCheck) -> String {
             env::consts::OS
         ));
     }
+    if matches!(check, DoctorCheck::All | DoctorCheck::Transparent) {
+        let status = TransparentController::current().status();
+        lines.push(format!(
+            "transparent: {}; backend={}; admin={}; {}",
+            status.phase,
+            status.backend,
+            if status.requires_admin {
+                "required"
+            } else {
+                "not-required"
+            },
+            status.detail
+        ));
+    }
 
     lines.join("\n")
 }
@@ -1694,6 +1712,7 @@ max_body = 64
         assert!(output.contains("trust:"));
         assert!(output.contains("material="));
         assert!(output.contains("platform:"));
+        assert!(output.contains("transparent:"));
     }
 
     #[test]

@@ -16,7 +16,7 @@ Lens is currently a development preview. Cross-platform release automation exist
 | Replay | HTTP/1 request preview and guarded execution against an explicit target |
 | Platforms | Windows, macOS Intel/Apple silicon, and Linux builds exercised in CI |
 
-Transparent interception, a process/service map, Redis, HTTP/2, gRPC, plugins, and eBPF discovery are not implemented. They remain roadmap work.
+The process/service identity map is implemented. Transparent interception now has a versioned platform contract and a first-party Windows WFP driver under development, but redirect-filter installation and original-destination forwarding are not enabled yet. Redis, HTTP/2, gRPC, plugins, and eBPF discovery remain roadmap work.
 
 ## Build and check
 
@@ -34,6 +34,7 @@ The executable is `target/release/lens` (`target\release\lens.exe` on Windows).
 ```sh
 lens quickstart
 lens doctor --check all
+lens doctor --check transparent
 lens run --listen 127.0.0.1:8888
 ```
 

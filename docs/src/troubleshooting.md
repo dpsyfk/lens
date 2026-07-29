@@ -2,6 +2,8 @@
 
 Start with `lens doctor --check all`; it reports the effective configuration, platform support, and certificate trust state without exposing captured secrets.
 
+`lens doctor --check transparent` is read-only. It reports the selected native backend and whether its platform facility or Windows driver is present; it does not install a driver, add packet filters, request elevation, or redirect traffic.
+
 ## Lens does not start
 
 - If the listener address is already in use, choose another local port and update the application proxy setting.
