@@ -16,7 +16,8 @@ use std::time::Duration;
 use http::uri::Authority;
 use http::Uri;
 use lens_core::{
-    Clock, CoreError, Direction, Endpoint, FlowId, ObservationEvent, ObservationKind, SystemClock,
+    Clock, CoreError, Direction, Endpoint, FlowId, ObservationEvent, ObservationKind,
+    ServiceIdentity, SystemClock,
 };
 use lens_tls::{platform_client_config, CertificateAuthority};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -305,6 +306,35 @@ pub struct ObservationSink {
     dropped: Arc<AtomicU64>,
 }
 
+/// Cloneable blocking identity callback invoked away from forwarding tasks.
+#[derive(Clone)]
+pub struct FlowIdentityLookup {
+    resolver: Arc<dyn Fn(SocketAddr, SocketAddr) -> Option<ServiceIdentity> + Send + Sync>,
+}
+
+impl FlowIdentityLookup {
+    /// Wraps a platform socket-owner resolver.
+    #[must_use]
+    pub fn new<F>(resolver: F) -> Self
+    where
+        F: Fn(SocketAddr, SocketAddr) -> Option<ServiceIdentity> + Send + Sync + 'static,
+    {
+        Self {
+            resolver: Arc::new(resolver),
+        }
+    }
+
+    fn resolve(&self, client: SocketAddr, listener: SocketAddr) -> Option<ServiceIdentity> {
+        (self.resolver)(client, listener)
+    }
+}
+
+impl fmt::Debug for FlowIdentityLookup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FlowIdentityLookup(platform callback)")
+    }
+}
+
 impl ObservationSink {
     /// Creates a bounded observation channel.
     #[must_use]
@@ -379,6 +409,7 @@ pub struct ProxyServer {
     local_addr: SocketAddr,
     config: ProxyRuntimeConfig,
     observer: Option<ObservationSink>,
+    identity_lookup: Option<FlowIdentityLookup>,
     clock: SystemClock,
 }
 
@@ -400,6 +431,7 @@ impl ProxyServer {
             local_addr,
             config,
             observer: None,
+            identity_lookup: None,
             clock: SystemClock::new(),
         })
     }
@@ -408,6 +440,13 @@ impl ProxyServer {
     #[must_use]
     pub fn with_observer(mut self, observer: ObservationSink) -> Self {
         self.observer = Some(observer);
+        self
+    }
+
+    /// Attaches best-effort client process identity enrichment.
+    #[must_use]
+    pub fn with_identity_lookup(mut self, lookup: FlowIdentityLookup) -> Self {
+        self.identity_lookup = Some(lookup);
         self
     }
 
@@ -444,7 +483,9 @@ impl ProxyServer {
                     let config = self.config.clone();
                     let task_counters = Arc::clone(&counters);
                     let observer = self.observer.clone();
+                    let identity_lookup = self.identity_lookup.clone();
                     let clock = self.clock.clone();
+                    let listener = self.local_addr;
                     connections.spawn(async move {
                         if let Err(error) = forward_connection(
                             client,
@@ -452,6 +493,10 @@ impl ProxyServer {
                             flow_id,
                             config,
                             observer.as_ref(),
+                            IdentityContext {
+                                lookup: identity_lookup,
+                                listener,
+                            },
                             &clock,
                             &task_counters,
                         ).await {
@@ -530,6 +575,7 @@ async fn forward_connection(
     flow_id: FlowId,
     config: ProxyRuntimeConfig,
     observer: Option<&ObservationSink>,
+    identity: IdentityContext,
     clock: &SystemClock,
     counters: &RuntimeCounters,
 ) -> Result<(), CoreError> {
@@ -567,6 +613,24 @@ async fn forward_connection(
             },
         ),
     );
+    if let (Some(lookup), Some(observer)) = (identity.lookup, observer.cloned()) {
+        let listener = identity.listener;
+        let identity_clock = clock.clone();
+        tokio::spawn(async move {
+            let resolved =
+                tokio::task::spawn_blocking(move || lookup.resolve(peer, listener)).await;
+            if let Ok(Some(identity)) = resolved {
+                emit(
+                    Some(&observer),
+                    ObservationEvent::new(
+                        flow_id,
+                        identity_clock.now(),
+                        ObservationKind::Identified { identity },
+                    ),
+                );
+            }
+        });
+    }
     tracing::info!(flow_id = %flow_id, peer = %peer, upstream = %route.upstream, protocol, "flow opened");
 
     if is_connect && config.https_mode == HttpsMode::Reject {
@@ -753,6 +817,12 @@ async fn forward_connection(
     );
     tracing::info!(flow_id = %flow_id, client_to_upstream, upstream_to_client, "flow closed");
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct IdentityContext {
+    lookup: Option<FlowIdentityLookup>,
+    listener: SocketAddr,
 }
 
 struct InterceptContext<'a> {
@@ -1250,6 +1320,56 @@ mod tests {
         shutdown.send(()).unwrap();
         let stats = task.await.unwrap().unwrap();
         assert_eq!((stats.accepted, stats.completed, stats.failed), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn process_identity_is_resolved_without_blocking_forwarding() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).await.unwrap();
+            stream.write_all(b"pong").await.unwrap();
+        });
+        let (observer, mut observations) = ObservationSink::channel(16);
+        let lookup = FlowIdentityLookup::new(|client, listener| {
+            assert!(client.port() > 0);
+            assert!(listener.port() > 0);
+            Some(
+                ServiceIdentity::new()
+                    .with_pid(731)
+                    .with_process("fixture")
+                    .with_service("checkout-api"),
+            )
+        });
+        let server = bind_server(ProxyRuntimeConfig::new(upstream_addr))
+            .with_observer(observer)
+            .with_identity_lookup(lookup);
+        let (address, shutdown, task) = run_server(server).await;
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut response = [0_u8; 4];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"pong");
+
+        let identity = timeout(Duration::from_secs(2), async {
+            while let Some(event) = observations.recv().await {
+                if let ObservationKind::Identified { identity } = event.kind {
+                    return identity;
+                }
+            }
+            panic!("observation channel closed before identity enrichment");
+        })
+        .await
+        .unwrap();
+        assert_eq!(identity.pid, Some(731));
+        assert_eq!(identity.display_name(), "checkout-api");
+
+        drop(client);
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

@@ -88,12 +88,26 @@ impl FlowFilter {
         }
         let needle = self.search.to_ascii_lowercase();
         let haystack = format!(
-            "{} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {}",
             flow.record.client,
             flow.record.upstream,
             flow.record.protocol.as_deref().unwrap_or("unknown"),
             flow.record.state,
             flow.failure.as_deref().unwrap_or_default(),
+            flow.record
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.display_name()),
+            flow.record
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.process.as_deref())
+                .unwrap_or_default(),
+            flow.record
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.container.as_deref())
+                .unwrap_or_default(),
             flow.messages
                 .iter()
                 .map(|message| message.summary.as_str())
@@ -384,6 +398,10 @@ fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
         .direction(LayoutDirection::Horizontal)
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(regions[1]);
+    let overview = Layout::default()
+        .direction(LayoutDirection::Vertical)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .split(content[0]);
 
     // Keep the default presentation quiet so Lens reads naturally alongside
     // application logs instead of looking like a high-saturation dashboard.
@@ -416,6 +434,41 @@ fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
         ),
     ]));
     frame.render_widget(header, regions[0]);
+
+    let service_map = app.snapshot.service_map();
+    let service_rows = service_map.iter().map(|node| {
+        let targets = node
+            .upstreams
+            .iter()
+            .map(|edge| format!("{} ({})", edge.upstream, edge.flows))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Row::new(vec![
+            Cell::from(node.service.clone()),
+            Cell::from(node.flows.to_string()),
+            Cell::from(node.failed.to_string()),
+            Cell::from(targets),
+        ])
+    });
+    let services = Table::new(
+        service_rows,
+        [
+            Constraint::Length(18),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Min(18),
+        ],
+    )
+    .header(
+        Row::new(["service", "flows", "failed", "upstreams"])
+            .style(Style::default().fg(Color::DarkGray)),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .title(format!(" service map {} ", service_map.len())),
+    );
+    frame.render_widget(services, overview[0]);
 
     let visible = app.visible_indices();
     let rows = visible.iter().filter_map(|index| {
@@ -461,7 +514,7 @@ fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     .highlight_symbol("› ");
     let mut state =
         TableState::default().with_selected((!visible.is_empty()).then_some(app.selected));
-    frame.render_stateful_widget(table, content[0], &mut state);
+    frame.render_stateful_widget(table, overview[1], &mut state);
 
     let inspector = Paragraph::new(inspector_text(app.selected_flow()))
         .block(Block::default().borders(Borders::TOP).title(" inspector "))
@@ -498,6 +551,17 @@ fn inspector_text(flow: Option<&StoredFlow>) -> Text<'static> {
             flow.upstream_to_client_bytes
         )),
     ];
+    if let Some(identity) = &flow.record.identity {
+        lines.push(Line::from(format!(
+            "service: {}  process: {}  pid: {}  container: {}",
+            identity.display_name(),
+            identity.process.as_deref().unwrap_or("unknown"),
+            identity
+                .pid
+                .map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
+            identity.container.as_deref().unwrap_or("-")
+        )));
+    }
     if let Some(failure) = &flow.failure {
         lines.push(Line::from(Span::styled(
             format!("failure: {}", sanitize(failure, 1024)),
@@ -602,7 +666,7 @@ fn sanitize(value: &str, max_chars: usize) -> String {
 mod tests {
     use lens_core::{
         Direction, Endpoint, EventEnvelope, EventSource, FlowId, FlowRecord, MessageId,
-        MessageRecord, RunId,
+        MessageRecord, RunId, ServiceIdentity,
     };
     use ratatui::backend::TestBackend;
 
@@ -617,7 +681,12 @@ mod tests {
             Endpoint::new("api.example.test", 443),
         )
         .with_protocol(protocol)
-        .with_state(state);
+        .with_state(state)
+        .with_identity(
+            ServiceIdentity::new()
+                .with_pid(700 + id as u32)
+                .with_process(format!("service-{id}")),
+        );
         let message_id = MessageId::new(id);
         record.push_message_id(message_id);
         let message = MessageRecord::new(
@@ -693,6 +762,8 @@ mod tests {
         assert!(rendered.contains("redaction on"));
         assert!(rendered.contains("4 dropped"));
         assert!(rendered.contains("postgres"));
+        assert!(rendered.contains("service map"));
+        assert!(rendered.contains("service-2"));
         assert!(rendered.contains("Query"));
     }
 
