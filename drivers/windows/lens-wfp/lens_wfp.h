@@ -37,7 +37,7 @@ void NTAPI LensClassifyConnectRedirect(
     _Inout_opt_ void *layer_data,
     _In_opt_ const void *classify_context,
     _In_ const FWPS_FILTER1 *filter,
-    _In_ uint64_t flow_context,
+    _In_ UINT64 flow_context,
     _Inout_ FWPS_CLASSIFY_OUT0 *classify_out);
 
 NTSTATUS NTAPI LensNotify(

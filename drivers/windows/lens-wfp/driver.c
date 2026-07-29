@@ -24,8 +24,8 @@ static LENS_DRIVER_STATE g_state;
 
 static BOOLEAN
 LensHeaderValid(_In_ const LENS_WFP_ABI_HEADER *header,
-                _In_ uint16_t expected_size,
-                _In_ uint32_t expected_operation)
+                _In_ LENS_UINT16 expected_size,
+                _In_ LENS_UINT32 expected_operation)
 {
     return header != NULL &&
            header->version == LENS_WFP_ABI_VERSION &&
@@ -289,7 +289,7 @@ LensClassifyConnectRedirect(
     _Inout_opt_ void *layer_data,
     _In_opt_ const void *classify_context,
     _In_ const FWPS_FILTER1 *filter,
-    _In_ uint64_t flow_context,
+    _In_ UINT64 flow_context,
     _Inout_ FWPS_CLASSIFY_OUT0 *classify_out)
 {
     LENS_WFP_CONFIG config;
