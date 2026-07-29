@@ -13,6 +13,7 @@ path = "src/main.rs"
 lens-core = { path = "../lens-core" }
 lens-platform = { path = "../lens-platform" }
 lens-proxy = { path = "../lens-proxy" }
+lens-replay = { path = "../lens-replay" }
 lens-store = { path = "../lens-store" }
 lens-tls = { path = "../lens-tls" }
 lens-tui = { path = "../lens-tui" }

@@ -1,9 +1,11 @@
-# CLI Design
+# CLI Design Backlog
+
+> **Status:** This is a product-design document, not the current command reference. The implemented commands are `run`, `doctor`, `cert`, `quickstart`, and `replay`; use `lens --help` for their exact flags. Commands such as `inspect`, `record`, standalone `export`, `benchmark`, `config`, and `completions` remain proposals unless promoted into the user guide.
 
 ## Purpose
 Lens is a developer tool, so the CLI is the product's primary interface, not a thin wrapper around internal APIs. The command set must be easy to remember, safe by default, and predictable across platforms.
 
-This document describes the intended UX contract for every command without implementing any runtime behavior.
+This document describes the intended long-term UX contract. Sections labeled as current reflect source behavior; other sections remain design backlog.
 
 ## CLI Philosophy
 
@@ -158,24 +160,31 @@ lens record --output ./captures/login-flow.jsonl --format jsonl
 ### Intent
 Reissue a captured request or session against an upstream target.
 
-### Responsibilities
-- Load a recorded flow or request.
-- Reconstruct the outgoing request in a controlled way.
-- Let the user choose whether to replay exactly, mutate, or dry-run.
+### Current responsibilities
+- Load a bounded JSON or JSONL snapshot.
+- Select one HTTP/1 flow and one one-based request index.
+- Reconstruct binary-safe headers and body from the stored, already-redacted representation.
+- Preview against an explicit target without network activity by default.
+- Execute only after every applicable risk is acknowledged.
 
-### Suggested flags
-- `--input <path>`: source capture.
-- `--flow <id>`: select a flow from a larger capture.
-- `--target <url>`: override the original upstream.
-- `--dry-run`: show what would be sent without sending it.
-- `--repeat <n>`: replay multiple times.
-- `--edit`: open a prompt or editor before sending.
-- `--headers <mode>`: keep, strip, or replace sensitive headers.
+### Current flags
+- `--input <path>`: source capture; required.
+- `--flow <id>`: select a flow when more than one HTTP flow exists.
+- `--request <n>`: one-based request in the flow; default 1.
+- `--target <origin>`: explicit HTTP(S) origin; required.
+- `--execute`: send the reviewed request.
+- `--allow-unsafe`: permit methods that may change state.
+- `--allow-secrets`: permit a reveal-mode capture.
+- `--allow-redacted`: permit literal redaction placeholders.
+- `--allow-remote`: permit a non-loopback target.
+- `--timeout-ms <n>`: request deadline.
 
 ### UX behavior
-- Replaying should be treated as a potentially dangerous action.
-- The command should warn when it can modify remote state.
-- Dry-run should be the default in non-interactive or ambiguous situations.
+- Replay is preview-only by default in every environment.
+- Header values and bodies are never printed in the preview.
+- Truncated and legacy text-only requests cannot execute.
+- Hop-by-hop headers are stripped and redirects are not followed.
+- Response comparison becomes unavailable instead of guessing when capture fidelity is insufficient.
 
 ### Trade-offs
 - Replay is a high-value debugging tool, but it is also the most likely command to cause side effects.
@@ -183,7 +192,8 @@ Reissue a captured request or session against an upstream target.
 
 ### Example
 ```text
-lens replay --input ./captures/login-flow.jsonl --target https://staging.api.example.com --dry-run
+lens replay --input ./captures/login-flow.jsonl --flow 12 \
+  --target http://127.0.0.1:8080
 ```
 
 ## Command: `lens doctor`

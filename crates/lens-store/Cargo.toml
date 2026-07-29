@@ -9,6 +9,7 @@ license = "Apache-2.0"
 path = "src/lib.rs"
 
 [dependencies]
+base64 = "0.22"
 lens-core = { path = "../lens-core" }
 lens-proto-http1 = { path = "../lens-proto-http1" }
 lens-proto-postgres = { path = "../lens-proto-postgres" }
