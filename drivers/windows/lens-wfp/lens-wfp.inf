@@ -21,8 +21,8 @@ DelFiles=LensWfp.DeleteFiles
 DelService=LensWfp,0x00000200
 
 [DestinationDirs]
-LensWfp.CopyFiles=12
-LensWfp.DeleteFiles=12
+LensWfp.CopyFiles=13
+LensWfp.DeleteFiles=13
 
 [SourceDisksNames]
 1=%InstallDisk%,,,
@@ -42,7 +42,7 @@ Description=%LensServiceDescription%
 ServiceType=1
 StartType=3
 ErrorControl=1
-ServiceBinary=%12%\LensWfp.sys
+ServiceBinary=%13%\LensWfp.sys
 LoadOrderGroup=PNP_TDI
 
 [Strings]
