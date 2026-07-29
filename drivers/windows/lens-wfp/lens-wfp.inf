@@ -22,6 +22,7 @@ DelService=LensWfp,0x00000200
 
 [DestinationDirs]
 LensWfp.CopyFiles=12
+LensWfp.DeleteFiles=12
 
 [SourceDisksNames]
 1=%InstallDisk%,,,
