@@ -373,8 +373,8 @@ fn transparent_target_lookup(expected_generation: u64) -> Result<FlowTargetLooku
         use std::os::windows::io::AsRawSocket;
 
         Ok(FlowTargetLookup::new(move |stream| {
-            let context =
-                redirect_context_from_raw_socket(stream.as_raw_socket() as usize).map_err(|error| {
+            let context = redirect_context_from_raw_socket(stream.as_raw_socket() as usize)
+                .map_err(|error| {
                     lens_core::CoreError::operation_failed("WFP context", error.to_string())
                 })?;
             if context.generation != expected_generation {
