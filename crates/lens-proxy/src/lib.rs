@@ -493,8 +493,10 @@ impl ProxyServer {
                             flow_id,
                             config,
                             observer.as_ref(),
-                            identity_lookup,
-                            listener,
+                            IdentityContext {
+                                lookup: identity_lookup,
+                                listener,
+                            },
                             &clock,
                             &task_counters,
                         ).await {
@@ -573,8 +575,7 @@ async fn forward_connection(
     flow_id: FlowId,
     config: ProxyRuntimeConfig,
     observer: Option<&ObservationSink>,
-    identity_lookup: Option<FlowIdentityLookup>,
-    listener: SocketAddr,
+    identity: IdentityContext,
     clock: &SystemClock,
     counters: &RuntimeCounters,
 ) -> Result<(), CoreError> {
@@ -612,7 +613,8 @@ async fn forward_connection(
             },
         ),
     );
-    if let (Some(lookup), Some(observer)) = (identity_lookup, observer.cloned()) {
+    if let (Some(lookup), Some(observer)) = (identity.lookup, observer.cloned()) {
+        let listener = identity.listener;
         let identity_clock = clock.clone();
         tokio::spawn(async move {
             let resolved =
@@ -815,6 +817,12 @@ async fn forward_connection(
     );
     tracing::info!(flow_id = %flow_id, client_to_upstream, upstream_to_client, "flow closed");
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct IdentityContext {
+    lookup: Option<FlowIdentityLookup>,
+    listener: SocketAddr,
 }
 
 struct InterceptContext<'a> {
