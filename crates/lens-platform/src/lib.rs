@@ -1,5 +1,9 @@
 //! User-scoped platform trust-store adapters.
 
+mod identity;
+
+pub use identity::{ProcessResolver, Resolution};
+
 use std::env;
 use std::ffi::OsString;
 use std::fmt;

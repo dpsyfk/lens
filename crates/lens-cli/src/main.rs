@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lens_core::{Endpoint, RunId};
-use lens_platform::{PlatformKind, TrustState, UserTrustStore};
+use lens_platform::{PlatformKind, ProcessResolver, TrustState, UserTrustStore};
 use lens_proxy::{
-    HttpsMode, ListenerConfig, ObservationSink, ProxyListener, ProxyMode as ProxyListenMode,
-    ProxyRuntimeConfig, ProxyServer, TlsInterception,
+    FlowIdentityLookup, HttpsMode, ListenerConfig, ObservationSink, ProxyListener,
+    ProxyMode as ProxyListenMode, ProxyRuntimeConfig, ProxyServer, TlsInterception,
 };
 use lens_replay::{execute as execute_replay, load_plan, ReplayPolicy, ReplaySelection};
 use lens_store::{StoreActor, StoreSnapshot};
@@ -237,7 +237,13 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
     let server = runtime
         .block_on(async { ProxyServer::from_listener(listener, runtime_config) })
         .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
-    let server = server.with_observer(observer.clone());
+    let process_resolver = ProcessResolver::current(config.service.clone());
+    let identity_lookup = FlowIdentityLookup::new(move |client, listener| {
+        process_resolver.resolve(client, listener).identity
+    });
+    let server = server
+        .with_observer(observer.clone())
+        .with_identity_lookup(identity_lookup);
 
     let (stats, snapshot) = if interactive {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -500,6 +506,12 @@ impl Cli {
                     flags.upstream = Some(
                         args.next()
                             .ok_or_else(|| CliError::MissingValue("--upstream".to_string()))?,
+                    );
+                }
+                "--service" => {
+                    flags.service = Some(
+                        args.next()
+                            .ok_or_else(|| CliError::MissingValue("--service".to_string()))?,
                     );
                 }
                 "--protocol" => {
@@ -870,6 +882,7 @@ impl std::str::FromStr for ProxyMode {
 struct ConfigValues {
     listen: Option<String>,
     upstream: Option<String>,
+    service: Option<String>,
     protocol: Option<TrafficProtocol>,
     mode: Option<ProxyMode>,
     https_mode: Option<HttpsMode>,
@@ -888,6 +901,7 @@ impl ConfigValues {
         Self {
             listen: env_vars.get("LENS_LISTEN").cloned(),
             upstream: env_vars.get("LENS_UPSTREAM").cloned(),
+            service: env_vars.get("LENS_SERVICE").cloned(),
             protocol: env_vars
                 .get("LENS_PROTOCOL")
                 .and_then(|value| value.parse().ok()),
@@ -929,6 +943,7 @@ struct ResolvedConfig {
     listen_addr: SocketAddr,
     upstream: Option<String>,
     upstream_endpoint: Option<Endpoint>,
+    service: Option<String>,
     protocol: TrafficProtocol,
     mode: ProxyMode,
     https_mode: HttpsMode,
@@ -963,6 +978,12 @@ impl ResolvedConfig {
             .or_else(|| env_vars.and_then(|values| values.upstream.clone()))
             .or_else(|| file.and_then(|values| values.upstream.clone()));
         let upstream_endpoint = upstream.as_deref().map(parse_endpoint).transpose()?;
+        let service = flags
+            .and_then(|values| values.service.clone())
+            .or_else(|| env_vars.and_then(|values| values.service.clone()))
+            .or_else(|| file.and_then(|values| values.service.clone()))
+            .map(|value| validate_service_label(value))
+            .transpose()?;
         let requested_protocol = flags
             .and_then(|values| values.protocol)
             .or_else(|| env_vars.and_then(|values| values.protocol))
@@ -1021,6 +1042,7 @@ impl ResolvedConfig {
             listen_addr,
             upstream,
             upstream_endpoint,
+            service,
             protocol,
             mode: pick(
                 flags.and_then(|values| values.mode),
@@ -1102,6 +1124,7 @@ fn parse_config_file(contents: &str) -> ConfigValues {
         match key {
             "listen" => values.listen = Some(value.to_string()),
             "upstream" => values.upstream = Some(value.to_string()),
+            "service" => values.service = Some(value.to_string()),
             "protocol" => values.protocol = value.parse().ok(),
             "mode" => values.mode = value.parse().ok(),
             "https" => values.https_mode = parse_https_mode(value).ok(),
@@ -1130,6 +1153,18 @@ fn parse_bool(value: &str) -> Result<bool, CliError> {
             expected: "true, false, 1, 0, yes, no, on, or off".to_string(),
         }),
     }
+}
+
+fn validate_service_label(value: String) -> Result<String, CliError> {
+    let value = value.trim().to_string();
+    if value.is_empty() || value.chars().count() > 128 || value.chars().any(char::is_control) {
+        return Err(CliError::InvalidValue {
+            name: "--service".to_string(),
+            value,
+            expected: "a non-empty label of at most 128 printable characters".to_string(),
+        });
+    }
+    Ok(value)
 }
 
 fn parse_endpoint(value: &str) -> Result<Endpoint, CliError> {
@@ -1201,7 +1236,7 @@ fn parse_positive_u64(name: &str, value: &str) -> Result<u64, CliError> {
 
 fn render_run_plan(config: &ResolvedConfig) -> String {
     format!(
-        "lens run\nmode: {}\nprotocol: {}\nlisten: {}\nupstream: {}\nhttps: {}\nredaction: {}\nheadless: {}\nrefresh: {} ms\nexport: {} ({})\nmax_flows: {}\nmax_body: {} bytes",
+        "lens run\nmode: {}\nprotocol: {}\nlisten: {}\nupstream: {}\nservice: {}\nhttps: {}\nredaction: {}\nheadless: {}\nrefresh: {} ms\nexport: {} ({})\nmax_flows: {}\nmax_body: {} bytes",
         config.mode,
         config.protocol,
         config.listen,
@@ -1209,6 +1244,7 @@ fn render_run_plan(config: &ResolvedConfig) -> String {
             .upstream
             .as_deref()
             .unwrap_or("selected from HTTP request"),
+        config.service.as_deref().unwrap_or("auto-detect"),
         config.https_mode,
         if config.reveal { "revealed" } else { "enabled" },
         config.headless,
@@ -1399,6 +1435,7 @@ GLOBAL OPTIONS:
   --config <path>            Read simple key = value configuration
   --listen <addr:port>       Listen address [default: 127.0.0.1:8888]
   --upstream <host:port>     Fixed target for TCP or PostgreSQL mode
+  --service <name>           Override the auto-detected client service label
   --protocol <http|tcp|postgres>
                              Protocol to route and inspect [auto-detected from upstream]
   --mode <explicit|transparent>

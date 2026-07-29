@@ -437,6 +437,11 @@ pub enum ObservationKind {
         /// Protocol classification available at routing time.
         protocol: Option<String>,
     },
+    /// Best-effort process and service identity resolved away from the data plane.
+    Identified {
+        /// Safe identity metadata for the client that owns this flow.
+        identity: ServiceIdentity,
+    },
     /// Bytes were forwarded in one direction.
     Transferred {
         /// Direction relative to the client.
@@ -490,6 +495,8 @@ pub struct FlowRecord {
     pub client: Endpoint,
     /// Upstream endpoint.
     pub upstream: Endpoint,
+    /// Best-effort identity of the client process or service.
+    pub identity: Option<ServiceIdentity>,
     /// Protocol label, if known.
     pub protocol: Option<String>,
     /// Current flow state.
@@ -506,6 +513,7 @@ impl FlowRecord {
             envelope,
             client,
             upstream,
+            identity: None,
             protocol: None,
             state: FlowState::Open,
             message_ids: Vec::new(),
@@ -516,6 +524,13 @@ impl FlowRecord {
     #[must_use]
     pub fn with_protocol(mut self, protocol: impl Into<String>) -> Self {
         self.protocol = Some(protocol.into());
+        self
+    }
+
+    /// Attaches best-effort client process and service identity.
+    #[must_use]
+    pub fn with_identity(mut self, identity: ServiceIdentity) -> Self {
+        self.identity = Some(identity);
         self
     }
 
@@ -611,6 +626,72 @@ pub struct SessionIdentity {
     pub container: Option<String>,
     /// Optional executable path.
     pub binary_path: Option<String>,
+}
+
+/// Safe process and service metadata attached to one observed flow.
+///
+/// Full command lines, environment variables, usernames, and executable paths
+/// are deliberately excluded from the normal observation and export model.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ServiceIdentity {
+    /// Operating-system process identifier, when available.
+    pub pid: Option<u32>,
+    /// Executable basename or process name.
+    pub process: Option<String>,
+    /// Stable service label, derived from explicit configuration or process name.
+    pub service: Option<String>,
+    /// Container or workload label, when a platform resolver can prove it safely.
+    pub container: Option<String>,
+}
+
+impl ServiceIdentity {
+    /// Creates an empty best-effort identity.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            pid: None,
+            process: None,
+            service: None,
+            container: None,
+        }
+    }
+
+    /// Attaches a process identifier.
+    #[must_use]
+    pub const fn with_pid(mut self, pid: u32) -> Self {
+        self.pid = Some(pid);
+        self
+    }
+
+    /// Attaches a safe process name.
+    #[must_use]
+    pub fn with_process(mut self, process: impl Into<String>) -> Self {
+        self.process = Some(process.into());
+        self
+    }
+
+    /// Attaches a service label.
+    #[must_use]
+    pub fn with_service(mut self, service: impl Into<String>) -> Self {
+        self.service = Some(service.into());
+        self
+    }
+
+    /// Attaches a container or workload label.
+    #[must_use]
+    pub fn with_container(mut self, container: impl Into<String>) -> Self {
+        self.container = Some(container.into());
+        self
+    }
+
+    /// Returns the preferred compact label for a terminal service map.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        self.service
+            .as_deref()
+            .or(self.process.as_deref())
+            .unwrap_or("unknown")
+    }
 }
 
 impl SessionIdentity {
@@ -1003,14 +1084,24 @@ mod tests {
         let client = Endpoint::new("127.0.0.1", 51515);
         let upstream = Endpoint::new("example.com", 443);
 
+        let service = ServiceIdentity::new()
+            .with_pid(731)
+            .with_process("checkout")
+            .with_service("checkout-api");
         let mut flow = FlowRecord::new(flow_envelope.clone(), client.clone(), upstream.clone())
-            .with_protocol("http1");
+            .with_protocol("http1")
+            .with_identity(service.clone());
         flow.push_message_id(MessageId::new(99));
 
         assert_eq!(flow.envelope, flow_envelope);
         assert_eq!(flow.client, client);
         assert_eq!(flow.upstream, upstream);
         assert_eq!(flow.protocol.as_deref(), Some("http1"));
+        assert_eq!(flow.identity, Some(service));
+        assert_eq!(
+            flow.identity.as_ref().unwrap().display_name(),
+            "checkout-api"
+        );
         assert_eq!(flow.state, FlowState::Open);
         assert_eq!(flow.message_ids, vec![MessageId::new(99)]);
         assert_eq!(flow.client.to_string(), "127.0.0.1:51515");

@@ -1,13 +1,13 @@
 //! Bounded, single-writer in-memory flow store.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use lens_core::{
     Direction, EventEnvelope, EventSource, FlowId, FlowRecord, FlowState, MessageId, MessageRecord,
-    ObservationEvent, ObservationKind, RunId, Sensitivity,
+    ObservationEvent, ObservationKind, RunId, Sensitivity, ServiceIdentity,
 };
 use lens_proto_http1::Http1Decoder;
 use lens_proto_postgres::PostgresDecoder;
@@ -37,7 +37,7 @@ impl StoredFlow {
     #[must_use]
     pub fn to_json_line(&self) -> String {
         format!(
-            "{{\"schema_version\":\"1.1\",\"flow_id\":{},\"client\":\"{}\",\"upstream\":\"{}\",\"protocol\":{},\"state\":\"{}\",\"client_to_upstream_bytes\":{},\"upstream_to_client_bytes\":{},\"failure\":{},\"decoder_error\":{},\"messages\":{}}}",
+            "{{\"schema_version\":\"1.2\",\"flow_id\":{},\"client\":\"{}\",\"upstream\":\"{}\",\"identity\":{},\"protocol\":{},\"state\":\"{}\",\"client_to_upstream_bytes\":{},\"upstream_to_client_bytes\":{},\"failure\":{},\"decoder_error\":{},\"messages\":{}}}",
             self.record
                 .envelope
                 .flow_id
@@ -45,6 +45,7 @@ impl StoredFlow {
                 .get(),
             escape_json(&self.record.client.to_string()),
             escape_json(&self.record.upstream.to_string()),
+            identity_json(self.record.identity.as_ref()),
             json_string(self.record.protocol.as_deref()),
             self.record.state,
             self.client_to_upstream_bytes,
@@ -65,7 +66,88 @@ pub struct StoreSnapshot {
     pub evicted: u64,
 }
 
+/// One deterministic service-to-upstream edge derived from retained flows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceEdge {
+    /// Upstream endpoint reached by the service.
+    pub upstream: String,
+    /// Number of retained flows on this edge.
+    pub flows: u64,
+}
+
+/// Aggregate node used by the terminal service map.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceNode {
+    /// Stable service or process label.
+    pub service: String,
+    /// Distinct process names observed for this service.
+    pub processes: Vec<String>,
+    /// Distinct process identifiers observed for this service.
+    pub pids: Vec<u32>,
+    /// Total retained flows owned by this service.
+    pub flows: u64,
+    /// Currently open flows.
+    pub open: u64,
+    /// Failed flows.
+    pub failed: u64,
+    /// Deterministically ordered upstream edges.
+    pub upstreams: Vec<ServiceEdge>,
+}
+
 impl StoreSnapshot {
+    /// Builds a deterministic service map from the current bounded flow snapshot.
+    #[must_use]
+    pub fn service_map(&self) -> Vec<ServiceNode> {
+        #[derive(Default)]
+        struct Aggregate {
+            processes: BTreeSet<String>,
+            pids: BTreeSet<u32>,
+            flows: u64,
+            open: u64,
+            failed: u64,
+            upstreams: BTreeMap<String, u64>,
+        }
+
+        let mut services = BTreeMap::<String, Aggregate>::new();
+        for flow in &self.flows {
+            let identity = flow.record.identity.as_ref();
+            let service = identity.map_or("unknown", ServiceIdentity::display_name);
+            let entry = services.entry(service.to_string()).or_default();
+            if let Some(process) = identity.and_then(|value| value.process.as_ref()) {
+                entry.processes.insert(process.clone());
+            }
+            if let Some(pid) = identity.and_then(|value| value.pid) {
+                entry.pids.insert(pid);
+            }
+            entry.flows = entry.flows.saturating_add(1);
+            entry.open = entry
+                .open
+                .saturating_add(u64::from(flow.record.state == FlowState::Open));
+            entry.failed = entry
+                .failed
+                .saturating_add(u64::from(flow.record.state == FlowState::Failed));
+            let upstream = flow.record.upstream.to_string();
+            let count = entry.upstreams.entry(upstream).or_default();
+            *count = count.saturating_add(1);
+        }
+        services
+            .into_iter()
+            .map(|(service, aggregate)| ServiceNode {
+                service,
+                processes: aggregate.processes.into_iter().collect(),
+                pids: aggregate.pids.into_iter().collect(),
+                flows: aggregate.flows,
+                open: aggregate.open,
+                failed: aggregate.failed,
+                upstreams: aggregate
+                    .upstreams
+                    .into_iter()
+                    .map(|(upstream, flows)| ServiceEdge { upstream, flows })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Renders one safe flow object per line for streaming diagnostics.
     #[must_use]
     pub fn to_jsonl(&self) -> String {
@@ -272,6 +354,11 @@ impl StoreActor {
                     _ => {}
                 }
             }
+            ObservationKind::Identified { identity } => {
+                if let Some(flow) = find_flow_mut(&mut state.flows, event.flow_id) {
+                    flow.record.identity = Some(identity);
+                }
+            }
             ObservationKind::Transferred { direction, bytes } => {
                 if let Some(flow) = find_flow_mut(&mut state.flows, event.flow_id) {
                     match direction {
@@ -380,6 +467,21 @@ fn json_string(value: Option<&str>) -> String {
     value
         .map(|value| format!("\"{}\"", escape_json(value)))
         .unwrap_or_else(|| "null".to_string())
+}
+
+fn identity_json(identity: Option<&ServiceIdentity>) -> String {
+    let Some(identity) = identity else {
+        return "null".to_string();
+    };
+    format!(
+        "{{\"pid\":{},\"process\":{},\"service\":{},\"container\":{}}}",
+        identity
+            .pid
+            .map_or_else(|| "null".to_string(), |pid| pid.to_string()),
+        json_string(identity.process.as_deref()),
+        json_string(identity.service.as_deref()),
+        json_string(identity.container.as_deref())
+    )
 }
 
 fn messages_json(messages: &[MessageRecord]) -> String {
@@ -634,7 +736,7 @@ mod tests {
         assert_eq!(flow.messages[0].envelope.sensitivity, Sensitivity::Redacted);
         assert_eq!(flow.messages[1].envelope.sensitivity, Sensitivity::Public);
         let exported = flow.to_json_line();
-        assert!(exported.contains("\"schema_version\":\"1.1\""));
+        assert!(exported.contains("\"schema_version\":\"1.2\""));
         assert!(exported.contains("\"wire_base64\":"));
         assert!(!exported.contains("query-secret"));
         assert!(!exported.contains("header-secret"));
@@ -749,6 +851,56 @@ mod tests {
         assert!(!exported.contains("secret"));
         assert!(exported.contains("token = '?' AND id = ?"));
         assert!(exported.contains("\"latency_nanos\":65"));
+    }
+
+    #[tokio::test]
+    async fn identity_enriches_exports_and_the_service_map() {
+        let (actor, handle) = StoreActor::new(4, RunId::new(5));
+        let (sender, receiver) = mpsc::channel(8);
+        let task = tokio::spawn(actor.run(receiver));
+
+        sender.send(opened(1)).await.unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(11, 21),
+                ObservationKind::Identified {
+                    identity: ServiceIdentity::new()
+                        .with_pid(731)
+                        .with_process("python")
+                        .with_service("checkout-api"),
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(12, 22),
+                ObservationKind::Failed {
+                    reason: "fixture failure".to_string(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let snapshot = handle.snapshot();
+        let identity = snapshot.flows[0].record.identity.as_ref().unwrap();
+        assert_eq!(identity.pid, Some(731));
+        assert_eq!(identity.display_name(), "checkout-api");
+        let exported = snapshot.flows[0].to_json_line();
+        assert!(exported.contains("\"identity\":{\"pid\":731"));
+        assert!(exported.contains("\"service\":\"checkout-api\""));
+
+        let services = snapshot.service_map();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].service, "checkout-api");
+        assert_eq!(services[0].processes, vec!["python"]);
+        assert_eq!(services[0].pids, vec![731]);
+        assert_eq!((services[0].flows, services[0].failed), (1, 1));
+        assert_eq!(services[0].upstreams[0].upstream, "example.test:80");
     }
 
     #[test]
