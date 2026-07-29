@@ -2,10 +2,14 @@
 
 Start with `lens doctor --check all`; it reports the effective configuration, platform support, and certificate trust state without exposing captured secrets.
 
+`lens doctor --check transparent` is read-only. It reports the selected native backend and whether its platform facility or Windows driver is present; it does not install a driver, request elevation, or redirect traffic. On Windows, `lens run --mode transparent` opens a dynamic WFP session only after the signed Lens driver has been installed and started. Closing Lens removes the filters and disables the driver configuration.
+
 ## Lens does not start
 
 - If the listener address is already in use, choose another local port and update the application proxy setting.
-- Transparent mode is not available in this release. Use the default explicit mode.
+- Windows transparent mode requires an elevated, signed driver installation. Until signed driver artifacts are published, use the default explicit mode for normal development.
+- Transparent HTTP inspection currently covers cleartext HTTP/1. HTTPS traffic is forwarded without a transparent MITM; use `HTTPS_PROXY` explicit mode for HTTPS inspection.
+- Driver installation and removal commands are documented in `drivers/windows/lens-wfp/README.md`. Never guess the Driver Store `oemNN.inf` name during removal.
 - If a configuration value is unexpected, `lens doctor --check config` shows the resolved value. CLI flags override environment, project configuration, user configuration, and defaults.
 
 ## HTTP traffic does not appear

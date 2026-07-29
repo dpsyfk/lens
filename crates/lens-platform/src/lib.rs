@@ -1,8 +1,14 @@
 //! User-scoped platform trust-store adapters.
 
 mod identity;
+mod transparent;
 
 pub use identity::{ProcessResolver, Resolution};
+pub use transparent::{
+    redirect_context_from_raw_socket, RedirectContext, TransparentBackend, TransparentConfig,
+    TransparentController, TransparentDriverStatus, TransparentError, TransparentPhase,
+    TransparentSession, TransparentStatus, LENS_WFP_ABI_VERSION,
+};
 
 use std::env;
 use std::ffi::OsString;

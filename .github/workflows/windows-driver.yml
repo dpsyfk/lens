@@ -1,0 +1,51 @@
+name: Windows driver
+
+on:
+  pull_request:
+    paths:
+      - "drivers/windows/**"
+      - "crates/lens-platform/**"
+      - ".github/workflows/windows-driver.yml"
+  push:
+    branches: [main]
+    paths:
+      - "drivers/windows/**"
+      - "crates/lens-platform/**"
+      - ".github/workflows/windows-driver.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-wfp-driver:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+      - name: Verify Rust and C driver ABI agreement
+        run: python scripts/check-wfp-abi.py
+      - name: Restore pinned Windows SDK and WDK packages
+        run: >-
+          nuget restore drivers/windows/lens-wfp/LensWfp.sln
+          -PackagesDirectory drivers/windows/lens-wfp/packages
+          -NonInteractive
+      - name: Build the unsigned development driver
+        run: >-
+          msbuild drivers/windows/lens-wfp/LensWfp.sln
+          /m
+          /p:Configuration=Release
+          /p:Platform=x64
+          /p:SignMode=Off
+          /warnaserror
+      - name: Verify the INF package metadata
+        shell: pwsh
+        run: |
+          $infverif = Get-ChildItem "drivers/windows/lens-wfp/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526" -Recurse -Filter infverif.exe |
+            Select-Object -First 1
+          if (-not $infverif) { throw "infverif.exe was not found in the pinned WDK" }
+          & $infverif.FullName /w drivers/windows/lens-wfp/lens-wfp.inf
+          if ($LASTEXITCODE -ne 0) { throw "InfVerif failed" }
