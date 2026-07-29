@@ -43,6 +43,7 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;UNICODE;_UNICODE;NDIS630;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SpectreMitigation>Spectre</SpectreMitigation>
     </ClCompile>
     <Link>
