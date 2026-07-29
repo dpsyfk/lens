@@ -344,8 +344,10 @@ impl fmt::Debug for FlowIdentityLookup {
 /// Cloneable platform callback that recovers a redirected socket's destination.
 #[derive(Clone)]
 pub struct FlowTargetLookup {
-    resolver: Arc<dyn Fn(&TcpStream) -> Result<Endpoint, CoreError> + Send + Sync>,
+    resolver: Arc<TargetResolver>,
 }
+
+type TargetResolver = dyn Fn(&TcpStream) -> Result<Endpoint, CoreError> + Send + Sync;
 
 impl FlowTargetLookup {
     /// Wraps an OS-specific original-destination query.
@@ -541,8 +543,8 @@ impl ProxyServer {
                             IdentityContext {
                                 lookup: identity_lookup,
                                 listener,
+                                target_lookup,
                             },
-                            target_lookup,
                             &clock,
                             &task_counters,
                         ).await {
@@ -622,7 +624,6 @@ async fn forward_connection(
     config: ProxyRuntimeConfig,
     observer: Option<&ObservationSink>,
     identity: IdentityContext,
-    target_lookup: Option<FlowTargetLookup>,
     clock: &SystemClock,
     counters: &RuntimeCounters,
 ) -> Result<(), CoreError> {
@@ -640,7 +641,8 @@ async fn forward_connection(
             }
         },
         ProxyTarget::Transparent => Route {
-            upstream: target_lookup
+            upstream: identity
+                .target_lookup
                 .as_ref()
                 .ok_or_else(|| {
                     CoreError::operation_failed(
@@ -883,6 +885,7 @@ async fn forward_connection(
 struct IdentityContext {
     lookup: Option<FlowIdentityLookup>,
     listener: SocketAddr,
+    target_lookup: Option<FlowTargetLookup>,
 }
 
 struct InterceptContext<'a> {
