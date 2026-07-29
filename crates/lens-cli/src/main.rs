@@ -1040,7 +1040,7 @@ impl ResolvedConfig {
             file.and_then(|values| values.listen.clone()),
             DEFAULT_LISTEN.to_string(),
         );
-        let listen_addr = listen.parse().map_err(|_| CliError::InvalidValue {
+        let listen_addr: SocketAddr = listen.parse().map_err(|_| CliError::InvalidValue {
             name: "--listen".to_string(),
             value: listen.clone(),
             expected: "addr:port, for example 127.0.0.1:8888".to_string(),
