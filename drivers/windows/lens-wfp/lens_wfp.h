@@ -1,11 +1,14 @@
 /* Copyright 2026 Lens contributors. SPDX-License-Identifier: Apache-2.0 */
 #pragma once
 
+#pragma warning(push)
+#pragma warning(disable : 4201) /* WDK headers use anonymous structs/unions. */
+#pragma warning(disable : 4324) /* WDK headers intentionally pad structures. */
 #include <ntddk.h>
 #include <wdf.h>
+#include <ndis.h>
 #include <fwpsk.h>
-#include <ws2def.h>
-#include <ws2ipdef.h>
+#pragma warning(pop)
 
 #include "include/lens_wfp_shared.h"
 
