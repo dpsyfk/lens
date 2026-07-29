@@ -982,7 +982,7 @@ impl ResolvedConfig {
             .and_then(|values| values.service.clone())
             .or_else(|| env_vars.and_then(|values| values.service.clone()))
             .or_else(|| file.and_then(|values| values.service.clone()))
-            .map(|value| validate_service_label(value))
+            .map(validate_service_label)
             .transpose()?;
         let requested_protocol = flags
             .and_then(|values| values.protocol)
