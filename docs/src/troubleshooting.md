@@ -9,6 +9,7 @@ Start with `lens doctor --check all`; it reports the effective configuration, pl
 - If the listener address is already in use, choose another local port and update the application proxy setting.
 - Windows transparent mode requires an elevated, signed driver installation. Until signed driver artifacts are published, use the default explicit mode for normal development.
 - Transparent HTTP inspection currently covers cleartext HTTP/1. HTTPS traffic is forwarded without a transparent MITM; use `HTTPS_PROXY` explicit mode for HTTPS inspection.
+- Driver installation and removal commands are documented in `drivers/windows/lens-wfp/README.md`. Never guess the Driver Store `oemNN.inf` name during removal.
 - If a configuration value is unexpected, `lens doctor --check config` shows the resolved value. CLI flags override environment, project configuration, user configuration, and defaults.
 
 ## HTTP traffic does not appear
