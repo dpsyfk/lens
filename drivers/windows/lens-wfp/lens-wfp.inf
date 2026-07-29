@@ -15,14 +15,12 @@ AddService=LensWfp,0x00000002,LensWfp.Service
 
 [DefaultUninstall.NTamd64]
 LegacyUninstall=1
-DelFiles=LensWfp.DeleteFiles
 
 [DefaultUninstall.NTamd64.Services]
 DelService=LensWfp,0x00000200
 
 [DestinationDirs]
 LensWfp.CopyFiles=13
-LensWfp.DeleteFiles=13
 
 [SourceDisksNames]
 1=%InstallDisk%,,,
@@ -31,9 +29,6 @@ LensWfp.DeleteFiles=13
 LensWfp.sys=1
 
 [LensWfp.CopyFiles]
-LensWfp.sys
-
-[LensWfp.DeleteFiles]
 LensWfp.sys
 
 [LensWfp.Service]
