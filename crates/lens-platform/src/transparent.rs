@@ -9,6 +9,9 @@ use std::process::{Command, Output};
 
 use crate::PlatformKind;
 
+#[cfg(target_os = "windows")]
+mod windows;
+
 /// ABI version shared with the first-party Windows WFP driver.
 pub const LENS_WFP_ABI_VERSION: u16 = 1;
 const ABI_HEADER_SIZE: u16 = 8;
@@ -19,6 +22,19 @@ const REDIRECT_CONTEXT_SIZE: u16 = 48;
 const OP_CONFIGURE: u32 = 1;
 const OP_STATUS: u32 = 3;
 const OP_REDIRECT_CONTEXT: u32 = 4;
+
+/// Active native redirect session. Dropping it disables redirection and rolls
+/// back the dynamic platform filters.
+pub struct TransparentSession {
+    #[cfg(target_os = "windows")]
+    _inner: windows::WindowsWfpSession,
+}
+
+impl fmt::Debug for TransparentSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TransparentSession(active native redirect)")
+    }
+}
 
 /// Native redirect implementation selected for the current operating system.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -276,6 +292,41 @@ impl TransparentController {
                 detail: "this operating system has no Lens transparent adapter".to_string(),
             },
         }
+    }
+
+    /// Activates a crash-safe native redirect session.
+    pub fn activate(
+        &self,
+        config: TransparentConfig,
+    ) -> Result<TransparentSession, TransparentError> {
+        #[cfg(not(target_os = "windows"))]
+        let _ = config;
+        match self.platform {
+            #[cfg(target_os = "windows")]
+            PlatformKind::Windows => Ok(TransparentSession {
+                _inner: windows::WindowsWfpSession::activate(config)?,
+            }),
+            _ => Err(TransparentError::new(
+                "transparent activation is not implemented for this platform",
+            )),
+        }
+    }
+}
+
+/// Recovers the WFP redirect context attached to an accepted Windows socket.
+pub fn redirect_context_from_raw_socket(
+    raw_socket: usize,
+) -> Result<RedirectContext, TransparentError> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::redirect_context(raw_socket);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = raw_socket;
+        Err(TransparentError::new(
+            "WFP redirect context is only available on Windows",
+        ))
     }
 }
 
