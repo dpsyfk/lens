@@ -20,5 +20,6 @@ If a release rotates or changes the local CA format, its release notes must call
 
 - Patch releases preserve CLI and export compatibility except for security corrections.
 - Minor releases may add fields and commands while preserving existing v0.1 behavior.
+- Export schema 1.1 adds `wire_base64` for binary-safe replay. Older text-only exports remain readable for previews but are intentionally not executable.
 - Breaking changes require a major version change after v1; before v1 they require an explicit migration note.
 - Downgrades never restore revealed secrets because revealed values are not persisted by default.

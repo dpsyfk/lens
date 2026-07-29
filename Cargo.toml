@@ -5,6 +5,7 @@ members = [
   "crates/lens-proto-http1",
   "crates/lens-proto-postgres",
   "crates/lens-redact",
+  "crates/lens-replay",
   "crates/lens-store",
   "crates/lens-platform",
   "crates/lens-tls",

@@ -28,6 +28,7 @@ required = {
     "INSTALL.md",
     "UPGRADING.md",
     "QUICKSTART.md",
+    "REPLAY.md",
     "TROUBLESHOOTING.md",
 }
 if not basenames.intersection(binary_names):

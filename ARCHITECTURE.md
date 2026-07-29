@@ -5,12 +5,14 @@ Lens is a local-first, proxy-first observability tool. The default product obser
 
 The central design goal is simple: forwarding must stay fast and reliable even when inspection, storage, decoding, or the UI fall behind.
 
+This document contains both implemented architecture and deliberately marked extension seams. The current implementation supports the explicit proxy path, HTTP/1 and PostgreSQL decoders, TLS interception, redaction, bounded storage, TUI, exports, and guarded HTTP replay. Transparent interception, process/service identity, plugins, and eBPF discovery are planned and are not current product capabilities.
+
 ## Internal Event Pipeline
 ### Decision
 The hot path is a one-way pipeline:
 
 - accept the connection
-- classify it as explicit proxy or transparent interception
+- classify it as explicit proxy traffic (transparent interception is a planned adapter)
 - resolve the upstream target
 - establish or reuse TLS locally when required
 - mirror bytes into an observation tap
@@ -54,12 +56,13 @@ The codebase is split by responsibility:
 - `lens-protocol` for decoder contracts and registry logic
 - `lens-proto-http1` and `lens-proto-postgres` for reference decoders
 - `lens-redact` for masking and reveal controls
+- `lens-replay` for bounded capture loading, replay safety policy, execution, and comparison
 - `lens-store` for bounded flow storage, indexing, and snapshots
-- `lens-platform` for OS-specific trust, identity, and redirection seams
+- `lens-platform` for OS-specific trust plus planned identity and redirection seams
 - `lens-tui` for rendering and input handling
 - `lens-cli` for startup, config resolution, and composition
-- `lens-plugin` for the sandboxed extension host
-- `lens-ebpf` for optional discovery support on Linux
+- `lens-plugin` as a placeholder for the planned sandboxed extension host
+- `lens-ebpf` as a placeholder for planned optional Linux discovery
 - `xtask`, `fuzz`, and benchmarks as tooling-only companions
 
 ### Trade-offs
@@ -76,9 +79,9 @@ Decoders are streaming state machines. They detect protocols from early bytes an
 - They are the only viable choice for fragmented packets, pipelined requests, and large bodies.
 - A shared decoder contract creates a stable extension seam, but it must be versioned carefully.
 
-## Plugin System
+## Plugin System (planned)
 ### Decision
-Plugins run as WASM components behind a versioned ABI. They are installed explicitly, sandboxed by resource limits, and denied ambient file or network access unless the host grants it. Plugin loading is opt-in only.
+The intended plugin system runs WASM components behind a versioned ABI. This host and ABI are not implemented yet. When implemented, plugins will be installed explicitly, sandboxed by resource limits, and denied ambient file or network access unless the host grants it. Plugin loading will remain opt-in only.
 
 ### Trade-offs
 - WASM adds marshalling overhead and a larger runtime footprint.
@@ -114,7 +117,7 @@ The process uses one runtime at the edge of the system for I/O, timers, and orch
 
 ## Error Handling Strategy
 ### Decision
-Errors are typed by module and translated at boundaries into user-facing diagnostics. A malformed packet, a decoder failure, or a plugin crash should degrade the affected flow rather than crash the whole process. Critical infrastructure failures stop the relevant session, not the entire tool.
+Errors are typed by module and translated at boundaries into user-facing diagnostics. A malformed packet or decoder failure degrades the affected flow rather than crashing the whole process. The same containment rule will apply to the planned plugin host. Critical infrastructure failures stop the relevant session, not the entire tool.
 
 ### Trade-offs
 - The error taxonomy is larger than a single generic error type.
@@ -150,7 +153,7 @@ Dependencies are passed in through constructors. The CLI is the composition root
 
 ## Extension Points
 ### Decision
-The system exposes extension points for protocol decoders, redaction rules, exporters, identity providers, platform adapters, discovery backends, and plugins. The default build should work without any external extensions, but the architecture should make new capabilities additive rather than invasive.
+The implemented system exposes seams for protocol decoders, redaction, exports, replay, and platform trust adapters. Identity providers, transparent redirection, discovery backends, and plugins are planned extension points. The default build works without external extensions, and later capabilities should remain additive rather than invasive.
 
 ### Trade-offs
 - More seams mean more versioning and compatibility discipline.

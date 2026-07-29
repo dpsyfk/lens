@@ -1,6 +1,6 @@
 # Installing Lens v0.1
 
-Lens v0.1 is distributed as signed release archives for Windows, macOS, and Linux. Package-manager installation is intentionally deferred until after v1.
+Lens v0.1 will be distributed as signed release archives for Windows, macOS, and Linux after the release gate passes. No signed public v0.1 release exists yet; until then, build from source and treat generated CI artifacts as development previews. Package-manager installation is intentionally deferred until after v1.
 
 ## 1. Choose an artifact
 
@@ -60,6 +60,6 @@ Remove that trust at any time with `lens cert uninstall`. Applications using cer
 lens run --listen 127.0.0.1:8888
 ```
 
-Point the application at `HTTP_PROXY=http://127.0.0.1:8888` and `HTTPS_PROXY=http://127.0.0.1:8888`. The release archive includes `QUICKSTART.md` and `TROUBLESHOOTING.md`; the same material is available in the online [quickstart](src/quickstart.md) and [troubleshooting guide](src/troubleshooting.md).
+Point the application at `HTTP_PROXY=http://127.0.0.1:8888` and `HTTPS_PROXY=http://127.0.0.1:8888`. The release archive includes `QUICKSTART.md`, `REPLAY.md`, and `TROUBLESHOOTING.md`; the same material is available in the online [quickstart](src/quickstart.md), [safe replay guide](src/export-replay.md), and [troubleshooting guide](src/troubleshooting.md).
 
 Release candidates are verified with the maintainer [dogfood protocol](DOGFOODING.md) before publication.

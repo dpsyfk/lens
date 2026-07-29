@@ -3,6 +3,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use lens_core::{
     Direction, EventEnvelope, EventSource, FlowId, FlowRecord, FlowState, MessageId, MessageRecord,
     ObservationEvent, ObservationKind, RunId, Sensitivity,
@@ -35,7 +37,7 @@ impl StoredFlow {
     #[must_use]
     pub fn to_json_line(&self) -> String {
         format!(
-            "{{\"flow_id\":{},\"client\":\"{}\",\"upstream\":\"{}\",\"protocol\":{},\"state\":\"{}\",\"client_to_upstream_bytes\":{},\"upstream_to_client_bytes\":{},\"failure\":{},\"decoder_error\":{},\"messages\":{}}}",
+            "{{\"schema_version\":\"1.1\",\"flow_id\":{},\"client\":\"{}\",\"upstream\":\"{}\",\"protocol\":{},\"state\":\"{}\",\"client_to_upstream_bytes\":{},\"upstream_to_client_bytes\":{},\"failure\":{},\"decoder_error\":{},\"messages\":{}}}",
             self.record
                 .envelope
                 .flow_id
@@ -385,11 +387,12 @@ fn messages_json(messages: &[MessageRecord]) -> String {
         .iter()
         .map(|message| {
             format!(
-                "{{\"message_id\":{},\"direction\":{},\"summary\":\"{}\",\"body\":\"{}\",\"truncated\":{},\"latency_nanos\":{},\"sensitivity\":\"{}\"}}",
+                "{{\"message_id\":{},\"direction\":{},\"summary\":\"{}\",\"body\":\"{}\",\"wire_base64\":\"{}\",\"truncated\":{},\"latency_nanos\":{},\"sensitivity\":\"{}\"}}",
                 message.envelope.message_id.unwrap_or_default().get(),
                 json_string(message.envelope.direction.map(|value| value.to_string()).as_deref()),
                 escape_json(&message.summary),
                 escape_json(&String::from_utf8_lossy(&message.body)),
+                BASE64.encode(&message.body),
                 message.truncated,
                 message.latency_nanos.map_or_else(|| "null".to_string(), |value| value.to_string()),
                 message.envelope.sensitivity
@@ -631,6 +634,8 @@ mod tests {
         assert_eq!(flow.messages[0].envelope.sensitivity, Sensitivity::Redacted);
         assert_eq!(flow.messages[1].envelope.sensitivity, Sensitivity::Public);
         let exported = flow.to_json_line();
+        assert!(exported.contains("\"schema_version\":\"1.1\""));
+        assert!(exported.contains("\"wire_base64\":"));
         assert!(!exported.contains("query-secret"));
         assert!(!exported.contains("header-secret"));
         assert!(!exported.contains("body-secret"));

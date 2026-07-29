@@ -15,6 +15,7 @@ use lens_proxy::{
     HttpsMode, ListenerConfig, ObservationSink, ProxyListener, ProxyMode as ProxyListenMode,
     ProxyRuntimeConfig, ProxyServer, TlsInterception,
 };
+use lens_replay::{execute as execute_replay, load_plan, ReplayPolicy, ReplaySelection};
 use lens_store::{StoreActor, StoreSnapshot};
 use lens_tls::{CaPaths, CaStatus, CertificateAuthority};
 use lens_tui::TuiConfig;
@@ -68,6 +69,9 @@ where
     if matches!(parsed.command, Command::Quickstart) {
         return Ok(render_quickstart());
     }
+    if matches!(parsed.command, Command::Replay) {
+        return run_replay_command(&parsed.replay, bind_listener);
+    }
 
     let file_values = match &parsed.config_path {
         Some(path) => Some(parse_config_file(
@@ -83,10 +87,85 @@ where
         Command::Run => run_proxy_session(&config, bind_listener),
         Command::Doctor { check } => Ok(render_doctor_report(&config, check)),
         Command::Cert { action } => run_cert_command(action, bind_listener),
-        Command::Help | Command::Version | Command::Quickstart => {
+        Command::Help | Command::Version | Command::Quickstart | Command::Replay => {
             unreachable!("handled before configuration")
         }
     }
+}
+
+fn run_replay_command(options: &ReplayArgs, allow_network: bool) -> Result<String, CliError> {
+    let input = options
+        .input
+        .as_deref()
+        .expect("replay input validated during parsing");
+    let target = options
+        .target
+        .as_deref()
+        .expect("replay target validated during parsing");
+    let selection = ReplaySelection::new(options.flow, options.request)
+        .map_err(|error| CliError::Replay(error.to_string()))?;
+    let plan = load_plan(input, selection).map_err(|error| CliError::Replay(error.to_string()))?;
+    let target_url = plan
+        .preview_target_url(target)
+        .map_err(|error| CliError::Replay(error.to_string()))?;
+    let header_names = if plan.headers.is_empty() {
+        "none".to_string()
+    } else {
+        plan.header_names().join(", ")
+    };
+    let warnings = [
+        plan.redacted.then_some("redacted placeholders are present"),
+        (plan.sensitivity == "secret").then_some("capture contains revealed secrets"),
+        plan.truncated
+            .then_some("request is truncated and cannot execute"),
+        plan.legacy_text_encoding
+            .then_some("legacy text-only capture is preview-only"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("; ");
+
+    let preview = format!(
+        "lens replay\nmode: preview\ninput: {}\nflow: {}\nrequest: {}\nmethod: {}\ntarget: {}\nheaders: {}\nbody: {} bytes\nsensitivity: {}\ncaptured_status: {}\nwarnings: {}",
+        input.display(),
+        plan.flow_id,
+        plan.request,
+        plan.method,
+        target_url,
+        header_names,
+        plan.body.len(),
+        plan.sensitivity,
+        plan.captured_status()
+            .map_or_else(|| "unavailable".to_string(), |status| status.to_string()),
+        if warnings.is_empty() { "none" } else { &warnings }
+    );
+    if !options.execute || !allow_network {
+        return Ok(format!(
+            "{preview}\nnetwork: not sent; pass --execute after reviewing the plan"
+        ));
+    }
+
+    let report = execute_replay(
+        &plan,
+        target,
+        ReplayPolicy {
+            allow_unsafe: options.allow_unsafe,
+            allow_secrets: options.allow_secrets,
+            allow_redacted: options.allow_redacted,
+            allow_remote: options.allow_remote,
+            timeout: Duration::from_millis(options.timeout_ms),
+        },
+    )
+    .map_err(|error| CliError::Replay(error.to_string()))?;
+    Ok(format!(
+        "{preview}\nmode: executed\nstatus: {}\nelapsed_ms: {}\nstatus_compare: {}\nbody_compare: {}\nresponse_truncated: {}\nredirects: not followed",
+        report.status,
+        report.elapsed_ms,
+        report.status_match,
+        report.body_match,
+        report.response_truncated
+    ))
 }
 
 /// Runs an HTTP or fixed-upstream forwarding session until Ctrl-C.
@@ -363,6 +442,7 @@ struct Cli {
     command: Command,
     config_path: Option<PathBuf>,
     flags: ConfigValues,
+    replay: ReplayArgs,
 }
 
 impl Cli {
@@ -375,11 +455,13 @@ impl Cli {
         let mut doctor_check = None;
         let mut config_path = None;
         let mut flags = ConfigValues::default();
+        let mut replay = ReplayArgs::default();
         let mut args = raw_args.into_iter().map(Into::into).peekable();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "run" => set_command(&mut command, Command::Run)?,
+                "replay" => set_command(&mut command, Command::Replay)?,
                 "doctor" => set_command(
                     &mut command,
                     Command::Doctor {
@@ -460,6 +542,65 @@ impl Cli {
                     flags.export_format = Some(value.parse()?);
                 }
                 "--allow-secret-export" => flags.allow_secret_export = Some(true),
+                "--input" => {
+                    replay.used = true;
+                    replay.input =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            CliError::MissingValue("--input".to_string())
+                        })?));
+                }
+                "--flow" => {
+                    replay.used = true;
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("--flow".to_string()))?;
+                    replay.flow = Some(parse_positive_u64("--flow", &value)?);
+                }
+                "--request" => {
+                    replay.used = true;
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("--request".to_string()))?;
+                    replay.request = parse_positive_usize("--request", &value)?;
+                }
+                "--target" => {
+                    replay.used = true;
+                    replay.target = Some(
+                        args.next()
+                            .ok_or_else(|| CliError::MissingValue("--target".to_string()))?,
+                    );
+                }
+                "--execute" => {
+                    replay.used = true;
+                    replay.execute = true;
+                }
+                "--dry-run" => {
+                    replay.used = true;
+                    replay.execute = false;
+                }
+                "--allow-unsafe" => {
+                    replay.used = true;
+                    replay.allow_unsafe = true;
+                }
+                "--allow-secrets" => {
+                    replay.used = true;
+                    replay.allow_secrets = true;
+                }
+                "--allow-redacted" => {
+                    replay.used = true;
+                    replay.allow_redacted = true;
+                }
+                "--allow-remote" => {
+                    replay.used = true;
+                    replay.allow_remote = true;
+                }
+                "--timeout-ms" => {
+                    replay.used = true;
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("--timeout-ms".to_string()))?;
+                    replay.timeout_ms = parse_positive_u64("--timeout-ms", &value)?;
+                }
                 "--max-flows" => {
                     let value = args
                         .next()
@@ -492,11 +633,25 @@ impl Cli {
             }
             command => command,
         };
+        if matches!(command, Command::Replay) {
+            if replay.input.is_none() {
+                return Err(CliError::MissingValue("--input".to_string()));
+            }
+            if replay.target.is_none() {
+                return Err(CliError::MissingValue("--target".to_string()));
+            }
+        } else if replay.used {
+            return Err(CliError::OptionRequiresCommand {
+                option: "replay options".to_string(),
+                command: "replay".to_string(),
+            });
+        }
 
         Ok(Self {
             command,
             config_path,
             flags,
+            replay,
         })
     }
 }
@@ -511,11 +666,45 @@ fn set_command(target: &mut Option<Command>, command: Command) -> Result<(), Cli
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Command {
     Run,
+    Replay,
     Doctor { check: DoctorCheck },
     Cert { action: CertAction },
     Quickstart,
     Help,
     Version,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReplayArgs {
+    input: Option<PathBuf>,
+    flow: Option<u64>,
+    request: usize,
+    target: Option<String>,
+    execute: bool,
+    allow_unsafe: bool,
+    allow_secrets: bool,
+    allow_redacted: bool,
+    allow_remote: bool,
+    timeout_ms: u64,
+    used: bool,
+}
+
+impl Default for ReplayArgs {
+    fn default() -> Self {
+        Self {
+            input: None,
+            flow: None,
+            request: 1,
+            target: None,
+            execute: false,
+            allow_unsafe: false,
+            allow_secrets: false,
+            allow_redacted: false,
+            allow_remote: false,
+            timeout_ms: 10_000,
+            used: false,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -994,6 +1183,22 @@ fn parse_positive_usize(name: &str, value: &str) -> Result<usize, CliError> {
     Ok(parsed)
 }
 
+fn parse_positive_u64(name: &str, value: &str) -> Result<u64, CliError> {
+    let parsed = value.parse::<u64>().map_err(|_| CliError::InvalidValue {
+        name: name.to_string(),
+        value: value.to_string(),
+        expected: "a positive integer".to_string(),
+    })?;
+    if parsed == 0 {
+        return Err(CliError::InvalidValue {
+            name: name.to_string(),
+            value: value.to_string(),
+            expected: "a positive integer".to_string(),
+        });
+    }
+    Ok(parsed)
+}
+
 fn render_run_plan(config: &ResolvedConfig) -> String {
     format!(
         "lens run\nmode: {}\nprotocol: {}\nlisten: {}\nupstream: {}\nhttps: {}\nredaction: {}\nheadless: {}\nrefresh: {} ms\nexport: {} ({})\nmax_flows: {}\nmax_body: {} bytes",
@@ -1119,6 +1324,7 @@ enum CliError {
     Certificate(String),
     Trust(String),
     Terminal(String),
+    Replay(String),
     Export {
         path: PathBuf,
         source: String,
@@ -1163,6 +1369,7 @@ impl fmt::Display for CliError {
             Self::Certificate(source) => write!(f, "lens: certificate operation failed: {source}"),
             Self::Trust(source) => write!(f, "lens: trust-store operation failed: {source}"),
             Self::Terminal(source) => write!(f, "lens: terminal UI failed: {source}"),
+            Self::Replay(source) => write!(f, "lens replay: {source}"),
             Self::Export { path, source } => {
                 write!(
                     f,
@@ -1183,6 +1390,7 @@ USAGE:
 
 COMMANDS:
   run        Start a live capture session (default)
+  replay     Preview or explicitly execute one captured HTTP/1 request
   doctor     Check config, platform, trust, and network readiness
   cert       Manage the explicit local CA: install, uninstall, or status
   quickstart Show the first-run HTTP, HTTPS, PostgreSQL, and export path
@@ -1210,11 +1418,24 @@ GLOBAL OPTIONS:
   --help                     Print help
   --version                  Print version
 
+REPLAY OPTIONS:
+  --input <path>             JSON or JSONL capture [required]
+  --flow <id>                Flow ID [required when multiple HTTP flows exist]
+  --request <n>              One-based request in the flow [default: 1]
+  --target <origin>          Explicit http:// or https:// replay origin [required]
+  --execute                  Send after preview validation [default: preview only]
+  --allow-unsafe             Permit methods that may change server state
+  --allow-secrets            Permit capture data produced with --reveal
+  --allow-redacted           Permit literal [REDACTED] placeholders
+  --allow-remote             Permit a non-loopback target
+  --timeout-ms <n>           Replay deadline [default: 10000]
+
 EXAMPLES:
   lens
   lens cert install
   lens cert status
   lens quickstart
+  lens replay --input lens-flows.jsonl --flow 1 --target http://127.0.0.1:8080
   HTTP_PROXY=http://127.0.0.1:8888 lens run --headless
   lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
   lens run --protocol postgres --listen 127.0.0.1:15432 --upstream db.example.com:5432 --headless
@@ -1324,6 +1545,7 @@ max_body = 64
         assert!(output.contains("USAGE:"));
         assert!(output.contains("COMMANDS:"));
         assert!(output.contains("quickstart"));
+        assert!(output.contains("replay"));
         assert!(output.contains("lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080"));
     }
 
@@ -1340,6 +1562,67 @@ max_body = 64
         assert!(output.contains("lens doctor --check all"));
         assert!(output.contains("lens cert install"));
         assert!(output.contains("TUI controls:"));
+    }
+
+    #[test]
+    fn replay_defaults_to_a_secret_safe_network_free_preview() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("flows.jsonl");
+        fs::write(
+            &path,
+            r#"{"schema_version":"1.1","flow_id":7,"protocol":"http1","messages":[{"direction":"client_to_server","summary":"GET /health HTTP/1.1","body":"X-Test: private\r\n\r\n","wire_base64":"WC1UZXN0OiBwcml2YXRlDQoNCg==","truncated":false,"sensitivity":"public"},{"direction":"server_to_client","summary":"HTTP/1.1 200 OK","body":"Content-Length: 2\r\n\r\nok","wire_base64":"Q29udGVudC1MZW5ndGg6IDINCg0Kb2s=","truncated":false,"sensitivity":"public"}]}"#,
+        )
+        .unwrap();
+
+        let output = run(
+            vec![
+                "replay".to_string(),
+                "--input".to_string(),
+                path.display().to_string(),
+                "--target".to_string(),
+                "http://127.0.0.1:8080".to_string(),
+            ],
+            &empty_env(),
+            |_| Err(CliError::ConfigNotFound(PathBuf::from("must-not-read"))),
+            false,
+        )
+        .unwrap();
+
+        assert!(output.contains("mode: preview"));
+        assert!(output.contains("network: not sent"));
+        assert!(output.contains("headers: X-Test"));
+        assert!(!output.contains("private"));
+        assert!(output.contains("captured_status: 200"));
+    }
+
+    #[test]
+    fn replay_requires_an_input_and_explicit_target() {
+        assert_eq!(
+            run(vec!["replay"], &empty_env(), |_| Ok(None), false).unwrap_err(),
+            CliError::MissingValue("--input".to_string())
+        );
+        assert_eq!(
+            run(
+                vec!["replay", "--input", "capture.jsonl"],
+                &empty_env(),
+                |_| Ok(None),
+                false,
+            )
+            .unwrap_err(),
+            CliError::MissingValue("--target".to_string())
+        );
+    }
+
+    #[test]
+    fn replay_options_are_rejected_for_other_commands() {
+        let error = run(
+            vec!["doctor", "--target", "http://127.0.0.1"],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::OptionRequiresCommand { .. }));
     }
 
     #[test]

@@ -66,3 +66,14 @@ For an inspectable trusted local hop, use a connection such as `postgresql://app
 - `q` or Ctrl-C stops Lens and restores the terminal.
 
 Use `--headless` for a non-interactive session and `--export PATH` for a redacted JSONL diagnostic. Exports never overwrite an existing file.
+
+## Replay one HTTP request
+
+Replay defaults to a preview and requires an explicit target:
+
+```sh
+lens replay --input lens-flows.jsonl --flow 1 \
+  --target http://127.0.0.1:8080
+```
+
+Review the output before adding `--execute`. Redacted placeholders, reveal-mode secrets, state-changing methods, and remote targets each require their own acknowledgement. Truncated or legacy text-only requests cannot execute. See [safe replay](export-replay.md) for the complete guard model.
