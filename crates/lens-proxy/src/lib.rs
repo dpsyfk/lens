@@ -36,7 +36,7 @@ const MAX_HTTP_HEAD_BYTES: usize = 64 * 1024;
 pub enum ProxyMode {
     /// Application points at Lens (HTTP_PROXY / connection string).
     Explicit,
-    /// OS-level redirection, reserved for a later platform milestone.
+    /// OS-level redirection with a platform original-destination lookup.
     Transparent,
 }
 
@@ -49,7 +49,7 @@ impl fmt::Display for ProxyMode {
     }
 }
 
-/// Validated listener configuration for the explicit proxy path.
+/// Validated listener configuration for a proxy listener.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListenerConfig {
     /// Bind address.
@@ -71,15 +71,9 @@ impl ListenerConfig {
     pub const fn new(addr: SocketAddr, mode: ProxyMode) -> Result<Self, CoreError> {
         Ok(Self { addr, mode })
     }
-
-    /// Returns true for the portable userspace path.
-    #[must_use]
-    pub const fn is_explicit(&self) -> bool {
-        matches!(self.mode, ProxyMode::Explicit)
-    }
 }
 
-/// Bound TCP listener for the explicit proxy path.
+/// Bound TCP listener for explicit or platform-redirected traffic.
 #[derive(Debug)]
 pub struct ProxyListener {
     listener: TcpListener,
@@ -87,14 +81,8 @@ pub struct ProxyListener {
 }
 
 impl ProxyListener {
-    /// Binds a TCP listener for explicit proxy traffic.
+    /// Binds a TCP listener. Native filter activation is handled separately.
     pub fn bind(config: ListenerConfig) -> Result<Self, CoreError> {
-        if !config.is_explicit() {
-            return Err(CoreError::operation_failed(
-                "bind",
-                "transparent mode is not implemented; use --mode explicit",
-            ));
-        }
         let listener = TcpListener::bind(config.addr).map_err(|error| {
             CoreError::operation_failed("bind", format!("{} ({})", config.addr, error))
         })?;
@@ -147,6 +135,8 @@ pub enum ProxyTarget {
     Fixed(Endpoint),
     /// The first HTTP absolute-form request or CONNECT line selects the target.
     Http,
+    /// A platform callback recovers the destination captured before redirection.
+    Transparent,
 }
 
 /// Protocol classification for fixed-target connections.
@@ -156,6 +146,8 @@ pub enum FixedProtocol {
     Tcp,
     /// PostgreSQL forwarding with bounded protocol observations.
     Postgres,
+    /// HTTP/1 forwarding with bounded protocol observations.
+    Http1,
 }
 
 impl FixedProtocol {
@@ -163,6 +155,7 @@ impl FixedProtocol {
         match self {
             Self::Tcp => "tcp",
             Self::Postgres => "postgres",
+            Self::Http1 => "http1",
         }
     }
 }
@@ -283,6 +276,19 @@ impl ProxyRuntimeConfig {
         config
     }
 
+    /// Creates transparent routing settings for one inspected protocol family.
+    #[must_use]
+    pub const fn transparent(protocol: FixedProtocol) -> Self {
+        Self {
+            target: ProxyTarget::Transparent,
+            fixed_protocol: protocol,
+            connect_timeout: Duration::from_secs(10),
+            shutdown_grace: Duration::from_secs(5),
+            https_mode: HttpsMode::Passthrough,
+            tls: None,
+        }
+    }
+
     /// Enables HTTPS interception with the supplied CA and upstream verifier.
     #[must_use]
     pub fn with_tls_interception(mut self, tls: TlsInterception) -> Self {
@@ -332,6 +338,35 @@ impl FlowIdentityLookup {
 impl fmt::Debug for FlowIdentityLookup {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("FlowIdentityLookup(platform callback)")
+    }
+}
+
+/// Cloneable platform callback that recovers a redirected socket's destination.
+#[derive(Clone)]
+pub struct FlowTargetLookup {
+    resolver: Arc<dyn Fn(&TcpStream) -> Result<Endpoint, CoreError> + Send + Sync>,
+}
+
+impl FlowTargetLookup {
+    /// Wraps an OS-specific original-destination query.
+    #[must_use]
+    pub fn new<F>(resolver: F) -> Self
+    where
+        F: Fn(&TcpStream) -> Result<Endpoint, CoreError> + Send + Sync + 'static,
+    {
+        Self {
+            resolver: Arc::new(resolver),
+        }
+    }
+
+    fn resolve(&self, stream: &TcpStream) -> Result<Endpoint, CoreError> {
+        (self.resolver)(stream)
+    }
+}
+
+impl fmt::Debug for FlowTargetLookup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FlowTargetLookup(platform callback)")
     }
 }
 
@@ -402,7 +437,7 @@ impl RuntimeCounters {
     }
 }
 
-/// Asynchronous explicit proxy server.
+/// Asynchronous explicit or native-redirect proxy server.
 #[derive(Debug)]
 pub struct ProxyServer {
     listener: tokio::net::TcpListener,
@@ -410,6 +445,7 @@ pub struct ProxyServer {
     config: ProxyRuntimeConfig,
     observer: Option<ObservationSink>,
     identity_lookup: Option<FlowIdentityLookup>,
+    target_lookup: Option<FlowTargetLookup>,
     clock: SystemClock,
 }
 
@@ -432,6 +468,7 @@ impl ProxyServer {
             config,
             observer: None,
             identity_lookup: None,
+            target_lookup: None,
             clock: SystemClock::new(),
         })
     }
@@ -447,6 +484,13 @@ impl ProxyServer {
     #[must_use]
     pub fn with_identity_lookup(mut self, lookup: FlowIdentityLookup) -> Self {
         self.identity_lookup = Some(lookup);
+        self
+    }
+
+    /// Attaches the platform original-destination lookup for transparent mode.
+    #[must_use]
+    pub fn with_target_lookup(mut self, lookup: FlowTargetLookup) -> Self {
+        self.target_lookup = Some(lookup);
         self
     }
 
@@ -484,6 +528,7 @@ impl ProxyServer {
                     let task_counters = Arc::clone(&counters);
                     let observer = self.observer.clone();
                     let identity_lookup = self.identity_lookup.clone();
+                    let target_lookup = self.target_lookup.clone();
                     let clock = self.clock.clone();
                     let listener = self.local_addr;
                     connections.spawn(async move {
@@ -497,6 +542,7 @@ impl ProxyServer {
                                 lookup: identity_lookup,
                                 listener,
                             },
+                            target_lookup,
                             &clock,
                             &task_counters,
                         ).await {
@@ -576,6 +622,7 @@ async fn forward_connection(
     config: ProxyRuntimeConfig,
     observer: Option<&ObservationSink>,
     identity: IdentityContext,
+    target_lookup: Option<FlowTargetLookup>,
     clock: &SystemClock,
     counters: &RuntimeCounters,
 ) -> Result<(), CoreError> {
@@ -591,6 +638,19 @@ async fn forward_connection(
                 let _ = write_http_error(&mut client, 400, "Bad Request").await;
                 return Err(error);
             }
+        },
+        ProxyTarget::Transparent => Route {
+            upstream: target_lookup
+                .as_ref()
+                .ok_or_else(|| {
+                    CoreError::operation_failed(
+                        "transparent route",
+                        "platform original-destination lookup is unavailable",
+                    )
+                })?
+                .resolve(&client)?,
+            protocol: config.fixed_protocol.label(),
+            behavior: RouteBehavior::Fixed,
         },
     };
 
@@ -1290,12 +1350,40 @@ mod tests {
     }
 
     #[test]
-    fn bind_rejects_transparent_mode() {
+    fn bind_accepts_transparent_mode_without_activating_platform_filters() {
         let config = ListenerConfig::parse("127.0.0.1:0", ProxyMode::Transparent).unwrap();
-        assert!(ProxyListener::bind(config)
-            .unwrap_err()
-            .to_string()
-            .contains("transparent"));
+        let listener = ProxyListener::bind(config).unwrap();
+        assert_eq!(listener.config().mode, ProxyMode::Transparent);
+    }
+
+    #[tokio::test]
+    async fn transparent_lookup_routes_to_original_destination() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).await.unwrap();
+            stream.write_all(b"pong").await.unwrap();
+        });
+        let server = bind_server(ProxyRuntimeConfig::transparent(FixedProtocol::Tcp))
+            .with_target_lookup(FlowTargetLookup::new(move |_| {
+                Ok(Endpoint::new(
+                    upstream_addr.ip().to_string(),
+                    upstream_addr.port(),
+                ))
+            }));
+        let (address, shutdown, task) = run_server(server).await;
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut response = [0_u8; 4];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"pong");
+        drop(client);
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!((stats.accepted, stats.completed, stats.failed), (1, 1, 0));
     }
 
     #[tokio::test]
