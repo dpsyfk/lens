@@ -11,7 +11,7 @@ This directory contains the first-party kernel component for Windows transparent
 - An unconfigured driver permits traffic. Allocation or redirect failure also permits the original connection and increments the error counter.
 - Loading, configuring, or removing the driver always requires an explicit elevated action.
 
-The runtime callouts alone do not affect traffic. A later user-space control layer must transactionally register the corresponding WFP provider, sublayer, callouts, and narrowly scoped filters before configuration can become active.
+The runtime callouts alone do not affect traffic. `lens run --mode transparent` opens a dynamic WFP engine session, transactionally registers the provider, sublayer, IPv4/IPv6 callouts, and TCP-only filters, then configures the driver. Closing or crashing the Lens process removes the dynamic policy; the driver also remains fail-open when it has no valid configuration.
 
 ## Build
 

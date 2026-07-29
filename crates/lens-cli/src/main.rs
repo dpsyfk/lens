@@ -7,15 +7,17 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lens_core::{Endpoint, RunId};
 use lens_platform::{
-    PlatformKind, ProcessResolver, TransparentController, TrustState, UserTrustStore,
+    redirect_context_from_raw_socket, PlatformKind, ProcessResolver, TransparentConfig,
+    TransparentController, TrustState, UserTrustStore,
 };
 use lens_proxy::{
-    FlowIdentityLookup, HttpsMode, ListenerConfig, ObservationSink, ProxyListener,
-    ProxyMode as ProxyListenMode, ProxyRuntimeConfig, ProxyServer, TlsInterception,
+    FixedProtocol, FlowIdentityLookup, FlowTargetLookup, HttpsMode, ListenerConfig,
+    ObservationSink, ProxyListener, ProxyMode as ProxyListenMode, ProxyRuntimeConfig, ProxyServer,
+    TlsInterception,
 };
 use lens_replay::{execute as execute_replay, load_plan, ReplayPolicy, ReplaySelection};
 use lens_store::{StoreActor, StoreSnapshot};
@@ -201,33 +203,41 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         .enable_all()
         .build()
         .map_err(|error| CliError::RuntimeFailed(error.to_string()))?;
-    let runtime_config = match config.protocol {
-        TrafficProtocol::Tcp => ProxyRuntimeConfig::fixed(
-            config
-                .upstream_endpoint
-                .clone()
-                .expect("TCP configuration requires an upstream"),
-        ),
-        TrafficProtocol::Postgres => ProxyRuntimeConfig::postgres(
-            config
-                .upstream_endpoint
-                .clone()
-                .expect("PostgreSQL configuration requires an upstream"),
-        ),
-        TrafficProtocol::Http => match config.https_mode {
-            HttpsMode::Intercept => {
-                let paths = CaPaths::for_user()
-                    .map_err(|error| CliError::Certificate(error.to_string()))?;
-                let authority = Arc::new(
-                    CertificateAuthority::load_or_create(paths)
-                        .map_err(|error| CliError::Certificate(error.to_string()))?,
-                );
-                let interception = TlsInterception::with_platform_verifier(authority)
-                    .map_err(|error| CliError::Certificate(error.to_string()))?;
-                ProxyRuntimeConfig::http().with_tls_interception(interception)
-            }
-            mode => ProxyRuntimeConfig::http().with_https_mode(mode),
-        },
+    let runtime_config = if config.mode == ProxyMode::Transparent {
+        ProxyRuntimeConfig::transparent(match config.protocol {
+            TrafficProtocol::Tcp => FixedProtocol::Tcp,
+            TrafficProtocol::Postgres => FixedProtocol::Postgres,
+            TrafficProtocol::Http => FixedProtocol::Http1,
+        })
+    } else {
+        match config.protocol {
+            TrafficProtocol::Tcp => ProxyRuntimeConfig::fixed(
+                config
+                    .upstream_endpoint
+                    .clone()
+                    .expect("TCP configuration requires an upstream"),
+            ),
+            TrafficProtocol::Postgres => ProxyRuntimeConfig::postgres(
+                config
+                    .upstream_endpoint
+                    .clone()
+                    .expect("PostgreSQL configuration requires an upstream"),
+            ),
+            TrafficProtocol::Http => match config.https_mode {
+                HttpsMode::Intercept => {
+                    let paths = CaPaths::for_user()
+                        .map_err(|error| CliError::Certificate(error.to_string()))?;
+                    let authority = Arc::new(
+                        CertificateAuthority::load_or_create(paths)
+                            .map_err(|error| CliError::Certificate(error.to_string()))?,
+                    );
+                    let interception = TlsInterception::with_platform_verifier(authority)
+                        .map_err(|error| CliError::Certificate(error.to_string()))?;
+                    ProxyRuntimeConfig::http().with_tls_interception(interception)
+                }
+                mode => ProxyRuntimeConfig::http().with_https_mode(mode),
+            },
+        }
     };
     let (observer, observations) = ObservationSink::channel(1024);
     let (store_actor, store_handle) = StoreActor::with_inspection(
@@ -236,16 +246,34 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         config.max_body,
         config.reveal,
     );
-    let server = runtime
+    let mut server = runtime
         .block_on(async { ProxyServer::from_listener(listener, runtime_config) })
         .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
     let process_resolver = ProcessResolver::current(config.service.clone());
     let identity_lookup = FlowIdentityLookup::new(move |client, listener| {
         process_resolver.resolve(client, listener).identity
     });
-    let server = server
+    server = server
         .with_observer(observer.clone())
         .with_identity_lookup(identity_lookup);
+    let _transparent_session = if config.mode == ProxyMode::Transparent {
+        let generation = 1_u32;
+        let native_config = TransparentConfig::new(
+            u64::from(std::process::id()),
+            local_addr.port(),
+            generation,
+            transparent_nonce(),
+        )
+        .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
+        server = server.with_target_lookup(transparent_target_lookup(u64::from(generation))?);
+        Some(
+            TransparentController::current()
+                .activate(native_config)
+                .map_err(|error| CliError::ProxyFailed(error.to_string()))?,
+        )
+    } else {
+        None
+    };
 
     let (stats, snapshot) = if interactive {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -328,6 +356,46 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         }
     }
     Ok(output)
+}
+
+fn transparent_nonce() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let nonce =
+        elapsed.as_secs() ^ u64::from(elapsed.subsec_nanos()) ^ u64::from(std::process::id());
+    nonce.max(1)
+}
+
+fn transparent_target_lookup(expected_generation: u64) -> Result<FlowTargetLookup, CliError> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::io::AsRawSocket;
+
+        Ok(FlowTargetLookup::new(move |stream| {
+            let context =
+                redirect_context_from_raw_socket(stream.as_raw_socket()).map_err(|error| {
+                    lens_core::CoreError::operation_failed("WFP context", error.to_string())
+                })?;
+            if context.generation != expected_generation {
+                return Err(lens_core::CoreError::operation_failed(
+                    "WFP context",
+                    "redirect generation does not match the active session",
+                ));
+            }
+            Ok(Endpoint::new(
+                context.destination.ip().to_string(),
+                context.destination.port(),
+            ))
+        }))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (expected_generation, redirect_context_from_raw_socket(0));
+        Err(CliError::ProxyFailed(
+            "native transparent activation is currently available only on Windows".to_string(),
+        ))
+    }
 }
 
 fn write_snapshot(
@@ -997,15 +1065,35 @@ impl ResolvedConfig {
         } else {
             TrafficProtocol::Http
         });
-        match (protocol, upstream_endpoint.is_some()) {
-            (TrafficProtocol::Http, true) => {
+        let mode = pick(
+            flags.and_then(|values| values.mode),
+            env_vars.and_then(|values| values.mode),
+            file.and_then(|values| values.mode),
+            DEFAULT_MODE,
+        );
+        if mode == ProxyMode::Transparent && !listen_addr.ip().is_loopback() {
+            return Err(CliError::InvalidValue {
+                name: "--listen".to_string(),
+                value: listen.clone(),
+                expected: "a loopback address for transparent mode".to_string(),
+            });
+        }
+        match (mode, protocol, upstream_endpoint.is_some()) {
+            (ProxyMode::Transparent, _, true) => {
+                return Err(CliError::InvalidValue {
+                    name: "--upstream".to_string(),
+                    value: upstream.clone().unwrap_or_default(),
+                    expected: "no fixed upstream in transparent mode".to_string(),
+                });
+            }
+            (ProxyMode::Explicit, TrafficProtocol::Http, true) => {
                 return Err(CliError::InvalidValue {
                     name: "--upstream".to_string(),
                     value: upstream.clone().unwrap_or_default(),
                     expected: "no fixed upstream when --protocol http is selected".to_string(),
                 });
             }
-            (TrafficProtocol::Tcp | TrafficProtocol::Postgres, false) => {
+            (ProxyMode::Explicit, TrafficProtocol::Tcp | TrafficProtocol::Postgres, false) => {
                 return Err(CliError::InvalidValue {
                     name: "--protocol".to_string(),
                     value: protocol.to_string(),
@@ -1048,12 +1136,7 @@ impl ResolvedConfig {
             upstream_endpoint,
             service,
             protocol,
-            mode: pick(
-                flags.and_then(|values| values.mode),
-                env_vars.and_then(|values| values.mode),
-                file.and_then(|values| values.mode),
-                DEFAULT_MODE,
-            ),
+            mode,
             https_mode: pick(
                 flags.and_then(|values| values.https_mode),
                 env_vars.and_then(|values| values.https_mode),
@@ -1247,7 +1330,11 @@ fn render_run_plan(config: &ResolvedConfig) -> String {
         config
             .upstream
             .as_deref()
-            .unwrap_or("selected from HTTP request"),
+            .unwrap_or(if config.mode == ProxyMode::Transparent {
+                "selected from native redirect context"
+            } else {
+                "selected from HTTP request"
+            }),
         config.service.as_deref().unwrap_or("auto-detect"),
         config.https_mode,
         if config.reveal { "revealed" } else { "enabled" },
@@ -1272,6 +1359,8 @@ fn render_quickstart() -> String {
                            HTTPS_PROXY=http://127.0.0.1:8888\n\
 5. PostgreSQL locally:     lens run --protocol postgres --listen 127.0.0.1:15432 --upstream 127.0.0.1:5432\n\
 6. Safe diagnostic file:   lens run --headless --export lens-flows.jsonl\n\n\
+Windows transparent TCP (signed driver required):\n\
+                           lens run --mode transparent --protocol http --listen 127.0.0.1:8888\n\n\
 TUI controls: j/k select, p protocol, s status, l latency, / search, x clear, q quit.\n\
 Redaction is always on unless --reveal is explicit. Secret exports additionally require --allow-secret-export."
         .to_string()
@@ -1775,6 +1864,21 @@ max_body = 64
                 expected: "--upstream host:port for fixed-target protocols".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn transparent_mode_uses_native_destination_without_an_upstream() {
+        let output = run(
+            vec!["run", "--mode", "transparent", "--protocol", "tcp"],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap();
+
+        assert!(output.contains("mode: transparent"));
+        assert!(output.contains("protocol: tcp"));
+        assert!(output.contains("upstream: selected from native redirect context"));
     }
 
     #[test]
