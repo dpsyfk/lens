@@ -34,7 +34,7 @@ def main() -> None:
         require(r"pub const LENS_WFP_ABI_VERSION: u16 = (\d+);", rust, RUST).group(1)
     )
     c_version = int(
-        require(r"#define LENS_WFP_ABI_VERSION \(\(uint16_t\)(\d+)\)", header, HEADER).group(1)
+        require(r"#define LENS_WFP_ABI_VERSION \(\(LENS_UINT16\)(\d+)\)", header, HEADER).group(1)
     )
     if rust_version != c_version:
         raise SystemExit(

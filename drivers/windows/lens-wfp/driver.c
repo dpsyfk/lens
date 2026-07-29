@@ -219,7 +219,8 @@ LensEvtIoDeviceControl(_In_ WDFQUEUE queue,
             input_length == sizeof(*config) && length >= sizeof(*config) &&
             LensHeaderValid(&config->header, sizeof(*config),
                             LENS_WFP_OPERATION_CONFIGURE) &&
-            config->proxy_pid != 0 && config->listen_port != 0 &&
+            config->proxy_pid != 0 && config->proxy_pid <= MAXULONG &&
+            config->listen_port != 0 &&
             config->generation != 0 && config->session_nonce != 0 &&
             config->flags == 0) {
             LensWriteConfig(config, TRUE);
@@ -251,10 +252,10 @@ LensEvtIoDeviceControl(_In_ WDFQUEUE queue,
             driver_status->state = active ? 2u : 1u;
             driver_status->generation = config.generation;
             driver_status->redirected_connections =
-                (uint64_t)InterlockedCompareExchange64(
+                (LENS_UINT64)InterlockedCompareExchange64(
                     &g_state.redirected_connections, 0, 0);
             driver_status->redirect_errors =
-                (uint64_t)InterlockedCompareExchange64(
+                (LENS_UINT64)InterlockedCompareExchange64(
                     &g_state.redirect_errors, 0, 0);
             information = sizeof(*driver_status);
             status = STATUS_SUCCESS;
@@ -323,7 +324,8 @@ LensClassifyConnectRedirect(
         return;
     }
 
-    status = FwpsAcquireClassifyHandle0(classify_context, 0, &classify_handle);
+    status = FwpsAcquireClassifyHandle0((PVOID)classify_context, 0,
+                                        &classify_handle);
     if (!NT_SUCCESS(status)) {
         InterlockedIncrement64(&g_state.redirect_errors);
         return;
@@ -382,7 +384,7 @@ LensClassifyConnectRedirect(
     }
 
     connect_request->localRedirectHandle = g_state.redirect_handle;
-    connect_request->localRedirectTargetPID = config.proxy_pid;
+    connect_request->localRedirectTargetPID = (UINT32)config.proxy_pid;
     connect_request->localRedirectContext = context;
     connect_request->localRedirectContextSize = sizeof(*context);
 

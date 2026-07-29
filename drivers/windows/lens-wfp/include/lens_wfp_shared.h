@@ -8,21 +8,28 @@
  */
 #pragma once
 
-#include <stdint.h>
-
 #if defined(_KERNEL_MODE)
 #include <devioctl.h>
+typedef UCHAR LENS_UINT8;
+typedef USHORT LENS_UINT16;
+typedef ULONG LENS_UINT32;
+typedef ULONGLONG LENS_UINT64;
 #else
+#include <stdint.h>
 #include <winioctl.h>
+typedef uint8_t LENS_UINT8;
+typedef uint16_t LENS_UINT16;
+typedef uint32_t LENS_UINT32;
+typedef uint64_t LENS_UINT64;
 #endif
 
-#define LENS_WFP_ABI_VERSION ((uint16_t)1)
-#define LENS_WFP_DEVICE_TYPE ((uint32_t)0x8337)
+#define LENS_WFP_ABI_VERSION ((LENS_UINT16)1)
+#define LENS_WFP_DEVICE_TYPE ((LENS_UINT32)0x8337)
 
-#define LENS_WFP_OPERATION_CONFIGURE ((uint32_t)1)
-#define LENS_WFP_OPERATION_DISABLE ((uint32_t)2)
-#define LENS_WFP_OPERATION_STATUS ((uint32_t)3)
-#define LENS_WFP_OPERATION_REDIRECT_CONTEXT ((uint32_t)4)
+#define LENS_WFP_OPERATION_CONFIGURE ((LENS_UINT32)1)
+#define LENS_WFP_OPERATION_DISABLE ((LENS_UINT32)2)
+#define LENS_WFP_OPERATION_STATUS ((LENS_UINT32)3)
+#define LENS_WFP_OPERATION_REDIRECT_CONTEXT ((LENS_UINT32)4)
 
 #define IOCTL_LENS_WFP_CONFIGURE                                                \
     CTL_CODE(LENS_WFP_DEVICE_TYPE, 0x900, METHOD_BUFFERED,                      \
@@ -36,39 +43,39 @@
 #pragma pack(push, 1)
 
 typedef struct LENS_WFP_ABI_HEADER {
-    uint16_t version;
-    uint16_t size;
-    uint32_t operation;
+    LENS_UINT16 version;
+    LENS_UINT16 size;
+    LENS_UINT32 operation;
 } LENS_WFP_ABI_HEADER;
 
 typedef struct LENS_WFP_CONFIG {
     LENS_WFP_ABI_HEADER header;
-    uint64_t proxy_pid;
-    uint16_t listen_port;
-    uint16_t flags;
-    uint32_t generation;
-    uint64_t session_nonce;
+    LENS_UINT64 proxy_pid;
+    LENS_UINT16 listen_port;
+    LENS_UINT16 flags;
+    LENS_UINT32 generation;
+    LENS_UINT64 session_nonce;
 } LENS_WFP_CONFIG;
 
 typedef struct LENS_WFP_STATUS {
     LENS_WFP_ABI_HEADER header;
-    uint32_t state;
-    uint32_t flags;
-    uint64_t generation;
-    uint64_t redirected_connections;
-    uint64_t redirect_errors;
+    LENS_UINT32 state;
+    LENS_UINT32 flags;
+    LENS_UINT64 generation;
+    LENS_UINT64 redirected_connections;
+    LENS_UINT64 redirect_errors;
 } LENS_WFP_STATUS;
 
 typedef struct LENS_WFP_REDIRECT_CONTEXT {
     LENS_WFP_ABI_HEADER header;
-    uint16_t address_family;
-    uint8_t protocol;
-    uint8_t flags;
-    uint16_t destination_port_network_order;
-    uint16_t reserved;
-    uint8_t destination_address[16];
-    uint64_t process_id;
-    uint64_t generation;
+    LENS_UINT16 address_family;
+    LENS_UINT8 protocol;
+    LENS_UINT8 flags;
+    LENS_UINT16 destination_port_network_order;
+    LENS_UINT16 reserved;
+    LENS_UINT8 destination_address[16];
+    LENS_UINT64 process_id;
+    LENS_UINT64 generation;
 } LENS_WFP_REDIRECT_CONTEXT;
 
 #pragma pack(pop)
