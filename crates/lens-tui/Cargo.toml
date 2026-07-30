@@ -12,4 +12,4 @@ path = "src/lib.rs"
 crossterm = "0.28"
 lens-core = { path = "../lens-core" }
 lens-store = { path = "../lens-store" }
-ratatui = "0.29"
+ratatui = "0.30"
