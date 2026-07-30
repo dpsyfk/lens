@@ -14,7 +14,7 @@ rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
 rustls-platform-verifier = "0.7"
-sha2 = "0.10"
+sha2 = "0.11"
 time = "0.3"
 
 [dev-dependencies]
