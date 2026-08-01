@@ -12,10 +12,13 @@ path = "src/lib.rs"
 base64 = "0.22"
 lens-core = { path = "../lens-core" }
 lens-proto-http1 = { path = "../lens-proto-http1" }
+lens-proto-http2 = { path = "../lens-proto-http2" }
 lens-proto-postgres = { path = "../lens-proto-postgres" }
+lens-proto-redis = { path = "../lens-proto-redis" }
 lens-protocol = { path = "../lens-protocol" }
 lens-redact = { path = "../lens-redact" }
 tokio = { version = "1.48", features = ["sync"] }
 
 [dev-dependencies]
+httlib-hpack = "0.1"
 tokio = { version = "1.48", features = ["macros", "rt"] }

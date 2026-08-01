@@ -149,7 +149,10 @@ The review assumes the product intentionally handles decrypted traffic in a loca
 ### 5. Malformed packets and hostile protocol inputs
 #### Surface
 - HTTP framing
+- HTTP/2 framing and HPACK decompression
+- gRPC message envelopes and opaque protobuf bodies
 - PostgreSQL wire parsing
+- Redis RESP2/RESP3 nesting and aggregate parsing
 - partial reads and reassembly
 - invalid UTF-8 or binary bodies
 - mixed-direction state transitions
@@ -167,6 +170,7 @@ The review assumes the product intentionally handles decrypted traffic in a loca
 - never assume a full message is available
 - enforce parser progress invariants
 - cap reassembly depth and body size
+- cap HTTP/2 frame/header observation and Redis aggregate nesting/item counts
 - fuzz parser boundaries heavily
 - reject impossible state transitions
 - treat parse failures as session degradation, not process failures

@@ -442,6 +442,11 @@ pub enum ObservationKind {
         /// Safe identity metadata for the client that owns this flow.
         identity: ServiceIdentity,
     },
+    /// A protocol was selected after routing, for example through TLS ALPN.
+    ProtocolDetected {
+        /// Stable protocol label used to select the streaming decoder.
+        protocol: String,
+    },
     /// Bytes were forwarded in one direction.
     Transferred {
         /// Direction relative to the client.

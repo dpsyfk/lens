@@ -10,7 +10,9 @@ use lens_core::{
     ObservationEvent, ObservationKind, RunId, Sensitivity, ServiceIdentity,
 };
 use lens_proto_http1::Http1Decoder;
+use lens_proto_http2::Http2Decoder;
 use lens_proto_postgres::PostgresDecoder;
+use lens_proto_redis::RedisDecoder;
 use lens_protocol::{DecodeBatch, StreamingDecoder};
 use lens_redact::Redactor;
 use tokio::sync::mpsc;
@@ -181,21 +183,27 @@ struct StoreState {
 #[derive(Debug)]
 enum ProtocolDecoder {
     Http1(Box<Http1Decoder>),
+    Http2(Box<Http2Decoder>),
     Postgres(Box<PostgresDecoder>),
+    Redis(Box<RedisDecoder>),
 }
 
 impl ProtocolDecoder {
     fn push(&mut self, direction: Direction, bytes: &[u8]) -> DecodeBatch {
         match self {
             Self::Http1(decoder) => decoder.push(direction, bytes),
+            Self::Http2(decoder) => decoder.push(direction, bytes),
             Self::Postgres(decoder) => decoder.push(direction, bytes),
+            Self::Redis(decoder) => decoder.push(direction, bytes),
         }
     }
 
     fn finish(&mut self, direction: Direction) -> DecodeBatch {
         match self {
             Self::Http1(decoder) => decoder.finish(direction),
+            Self::Http2(decoder) => decoder.finish(direction),
             Self::Postgres(decoder) => decoder.finish(direction),
+            Self::Redis(decoder) => decoder.finish(direction),
         }
     }
 }
@@ -227,7 +235,7 @@ pub struct StoreActor {
     max_body: usize,
     reveal: bool,
     decoders: HashMap<FlowId, ProtocolDecoder>,
-    pending_requests: HashMap<FlowId, VecDeque<u64>>,
+    pending_requests: HashMap<(FlowId, String), VecDeque<u64>>,
     redactor: Redactor,
 }
 
@@ -293,7 +301,8 @@ impl StoreActor {
                 let server = decoder.finish(Direction::ServerToClient);
                 self.store_batch(event.flow_id, event.timestamp, server);
             }
-            self.pending_requests.remove(&event.flow_id);
+            self.pending_requests
+                .retain(|(flow_id, _), _| *flow_id != event.flow_id);
         }
 
         let mut state = self
@@ -313,7 +322,8 @@ impl StoreActor {
                         .and_then(|flow| flow.record.envelope.flow_id);
                     if let Some(evicted_flow_id) = evicted_flow_id {
                         self.decoders.remove(&evicted_flow_id);
-                        self.pending_requests.remove(&evicted_flow_id);
+                        self.pending_requests
+                            .retain(|(flow_id, _), _| *flow_id != evicted_flow_id);
                     }
                     state.evicted = state.evicted.saturating_add(1);
                 }
@@ -343,6 +353,12 @@ impl StoreActor {
                             ProtocolDecoder::Http1(Box::new(Http1Decoder::new(self.max_body))),
                         );
                     }
+                    Some("http2" | "grpc") => {
+                        self.decoders.insert(
+                            event.flow_id,
+                            ProtocolDecoder::Http2(Box::new(Http2Decoder::new(self.max_body))),
+                        );
+                    }
                     Some("postgres") => {
                         self.decoders.insert(
                             event.flow_id,
@@ -351,12 +367,43 @@ impl StoreActor {
                             ))),
                         );
                     }
+                    Some("redis") => {
+                        self.decoders.insert(
+                            event.flow_id,
+                            ProtocolDecoder::Redis(Box::new(RedisDecoder::new(self.max_body))),
+                        );
+                    }
                     _ => {}
                 }
             }
             ObservationKind::Identified { identity } => {
                 if let Some(flow) = find_flow_mut(&mut state.flows, event.flow_id) {
                     flow.record.identity = Some(identity);
+                }
+            }
+            ObservationKind::ProtocolDetected { protocol } => {
+                if let Some(flow) = find_flow_mut(&mut state.flows, event.flow_id) {
+                    flow.record.protocol = Some(protocol.clone());
+                }
+                let decoder = match protocol.as_str() {
+                    "http1" => Some(ProtocolDecoder::Http1(Box::new(Http1Decoder::new(
+                        self.max_body,
+                    )))),
+                    "http2" | "grpc" => Some(ProtocolDecoder::Http2(Box::new(Http2Decoder::new(
+                        self.max_body,
+                    )))),
+                    "postgres" => Some(ProtocolDecoder::Postgres(Box::new(PostgresDecoder::new(
+                        self.max_body,
+                    )))),
+                    "redis" => Some(ProtocolDecoder::Redis(Box::new(RedisDecoder::new(
+                        self.max_body,
+                    )))),
+                    _ => None,
+                };
+                if let Some(decoder) = decoder {
+                    self.decoders.insert(event.flow_id, decoder);
+                } else {
+                    self.decoders.remove(&event.flow_id);
                 }
             }
             ObservationKind::Transferred { direction, bytes } => {
@@ -404,6 +451,17 @@ impl StoreActor {
             }
         }
         for decoded in batch.messages {
+            let stream_id = decoded
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("lens-stream-id"))
+                .map_or_else(String::new, |(_, value)| value.clone());
+            let request_key = (flow_id, stream_id);
+            let decoded_protocol = decoded
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("lens-protocol"))
+                .map(|(_, value)| value.clone());
             let boundary = decoded
                 .headers
                 .iter()
@@ -412,14 +470,14 @@ impl StoreActor {
             let latency_nanos = match boundary {
                 Some("request") => {
                     self.pending_requests
-                        .entry(flow_id)
+                        .entry(request_key.clone())
                         .or_default()
                         .push_back(timestamp.mono_nanos);
                     None
                 }
                 Some("response") => self
                     .pending_requests
-                    .get_mut(&flow_id)
+                    .get_mut(&request_key)
                     .and_then(VecDeque::pop_front)
                     .map(|started| timestamp.mono_nanos.saturating_sub(started)),
                 _ => None,
@@ -450,6 +508,9 @@ impl StoreActor {
             .with_truncated(truncated)
             .with_latency_nanos(latency_nanos);
             if let Some(flow) = find_flow_mut(&mut state.flows, flow_id) {
+                if decoded_protocol.as_deref() == Some("grpc") {
+                    flow.record.protocol = Some("grpc".to_string());
+                }
                 flow.record.push_message_id(message_id);
                 flow.messages.push(message);
             }
@@ -526,6 +587,7 @@ fn escape_json(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use httlib_hpack::Encoder;
     use lens_core::{Endpoint, TimestampPair};
 
     fn opened(flow_id: u64) -> ObservationEvent {
@@ -557,6 +619,45 @@ mod tests {
         frame.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    fn redis_command(arguments: &[&str]) -> Vec<u8> {
+        let mut frame = format!("*{}\r\n", arguments.len()).into_bytes();
+        for argument in arguments {
+            frame.extend_from_slice(format!("${}\r\n{}\r\n", argument.len(), argument).as_bytes());
+        }
+        frame
+    }
+
+    fn http2_frame(kind: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+        let length = payload.len();
+        let mut frame = vec![
+            ((length >> 16) & 0xff) as u8,
+            ((length >> 8) & 0xff) as u8,
+            (length & 0xff) as u8,
+            kind,
+            flags,
+        ];
+        frame.extend_from_slice(&(stream_id & 0x7fff_ffff).to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    fn hpack_headers(encoder: &mut Encoder<'_>, values: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        for (name, value) in values {
+            encoder
+                .encode(
+                    (
+                        name.to_vec(),
+                        value.to_vec(),
+                        Encoder::WITH_INDEXING | Encoder::BEST_FORMAT,
+                    ),
+                    &mut encoded,
+                )
+                .unwrap();
+        }
+        encoded
     }
 
     #[tokio::test]
@@ -851,6 +952,143 @@ mod tests {
         assert!(!exported.contains("secret"));
         assert!(exported.contains("token = '?' AND id = ?"));
         assert!(exported.contains("\"latency_nanos\":65"));
+    }
+
+    #[tokio::test]
+    async fn redis_credentials_and_response_values_are_redacted_before_storage() {
+        let (actor, handle) = StoreActor::with_inspection(2, RunId::new(7), 1024, false);
+        let (sender, receiver) = mpsc::channel(8);
+        let task = tokio::spawn(actor.run(receiver));
+
+        sender
+            .send(opened_with_protocol(1, "redis", 6379))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(100, 200),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: redis_command(&["AUTH", "alice", "hunter2"]),
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(125, 225),
+                ObservationKind::Data {
+                    direction: Direction::ServerToClient,
+                    bytes: b"$13\r\nprivate-value\r\n".to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let snapshot = handle.snapshot();
+        let flow = &snapshot.flows[0];
+        assert_eq!(flow.record.protocol.as_deref(), Some("redis"));
+        assert_eq!(flow.messages.len(), 2);
+        assert_eq!(flow.messages[0].envelope.sensitivity, Sensitivity::Redacted);
+        assert_eq!(flow.messages[1].envelope.sensitivity, Sensitivity::Redacted);
+        assert_eq!(flow.messages[1].latency_nanos, Some(25));
+        let exported = flow.to_json_line();
+        assert!(!exported.contains("hunter2"));
+        assert!(!exported.contains("private-value"));
+        assert!(exported.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn http2_multiplexed_latency_is_paired_by_stream() {
+        let (actor, handle) = StoreActor::with_inspection(2, RunId::new(8), 1024, false);
+        let (sender, receiver) = mpsc::channel(16);
+        let task = tokio::spawn(actor.run(receiver));
+        sender
+            .send(opened_with_protocol(1, "http2", 443))
+            .await
+            .unwrap();
+
+        let mut request_encoder = Encoder::default();
+        let request_one = hpack_headers(
+            &mut request_encoder,
+            &[
+                (&b":method"[..], &b"GET"[..]),
+                (&b":path"[..], &b"/slow"[..]),
+                (&b"authorization"[..], &b"Bearer stream-secret"[..]),
+            ],
+        );
+        let request_three = hpack_headers(
+            &mut request_encoder,
+            &[
+                (&b":method"[..], &b"GET"[..]),
+                (&b":path"[..], &b"/fast"[..]),
+            ],
+        );
+        let mut first = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        first.extend(http2_frame(1, 0x5, 1, &request_one));
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(100, 200),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: first,
+                },
+            ))
+            .await
+            .unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(200, 300),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: http2_frame(1, 0x5, 3, &request_three),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let mut response_encoder = Encoder::default();
+        let response = hpack_headers(&mut response_encoder, &[(b":status", b"200")]);
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(250, 350),
+                ObservationKind::Data {
+                    direction: Direction::ServerToClient,
+                    bytes: http2_frame(1, 0x5, 3, &response),
+                },
+            ))
+            .await
+            .unwrap();
+        let response = hpack_headers(&mut response_encoder, &[(b":status", b"200")]);
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(400, 500),
+                ObservationKind::Data {
+                    direction: Direction::ServerToClient,
+                    bytes: http2_frame(1, 0x5, 1, &response),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let flow = &handle.snapshot().flows[0];
+        assert_eq!(flow.messages.len(), 4);
+        assert_eq!(flow.messages[2].summary, "HTTP/2 200");
+        assert_eq!(flow.messages[2].latency_nanos, Some(50));
+        assert_eq!(flow.messages[3].latency_nanos, Some(300));
+        let exported = flow.to_json_line();
+        assert!(!exported.contains("stream-secret"));
+        assert!(exported.contains("authorization: [REDACTED]"));
     }
 
     #[tokio::test]

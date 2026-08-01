@@ -5,7 +5,9 @@ on:
     paths:
       - "fuzz/**"
       - "crates/lens-proto-http1/**"
+      - "crates/lens-proto-http2/**"
       - "crates/lens-proto-postgres/**"
+      - "crates/lens-proto-redis/**"
       - ".github/workflows/fuzz.yml"
   schedule:
     - cron: "17 3 * * 1"
@@ -30,3 +32,7 @@ jobs:
         run: cargo +nightly fuzz run http1 -- -runs=512 -rss_limit_mb=512
       - name: Exercise PostgreSQL decoder
         run: cargo +nightly fuzz run postgres -- -runs=512 -rss_limit_mb=512
+      - name: Exercise HTTP/2 and gRPC decoder
+        run: cargo +nightly fuzz run http2 -- -runs=512 -rss_limit_mb=512
+      - name: Exercise Redis decoder
+        run: cargo +nightly fuzz run redis -- -runs=512 -rss_limit_mb=512

@@ -146,6 +146,8 @@ Fuzzing should target the highest-risk parsing and boundary code.
 Targets:
 - HTTP parser inputs
 - PostgreSQL wire parser inputs
+- HTTP/2 frames, HPACK blocks, continuation sequences, and gRPC envelopes
+- Redis RESP2/RESP3 frames, nesting, aggregates, pipelining, and pushes
 - redaction parser inputs
 - config file parser inputs
 - export import readers
@@ -214,7 +216,7 @@ Metrics:
 
 ## CI Strategy
 
-The repository implements this hierarchy in `ci.yml`, `integration.yml`, `fuzz.yml`, `bench.yml`, and `docs.yml`. Parser corpus cases run in the stable workspace suite, while short libFuzzer mutation runs exercise the same HTTP/1 and PostgreSQL state machines on relevant pull requests. Scheduled jobs extend load and resource reporting without slowing unrelated changes.
+The repository implements this hierarchy in `ci.yml`, `integration.yml`, `fuzz.yml`, `bench.yml`, and `docs.yml`. Parser corpus cases run in the stable workspace suite, while short libFuzzer mutation runs exercise the HTTP/1, HTTP/2/gRPC, PostgreSQL, and Redis state machines on relevant pull requests. Scheduled jobs extend load and resource reporting without slowing unrelated changes.
 
 ### Baseline pipeline
 Every pull request should run a fast baseline that includes:

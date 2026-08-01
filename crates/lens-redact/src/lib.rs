@@ -14,7 +14,7 @@ pub struct RedactionOutcome {
     pub redacted: bool,
 }
 
-/// Redacts common HTTP and PostgreSQL secrets unless reveal mode is enabled.
+/// Redacts common HTTP, PostgreSQL, Redis, and gRPC secrets unless reveal mode is enabled.
 #[derive(Clone, Debug)]
 pub struct Redactor {
     reveal: bool,
@@ -47,12 +47,22 @@ impl Redactor {
         let postgres = message.headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("lens-protocol") && value.eq_ignore_ascii_case("postgres")
         });
+        let redis = message.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("lens-protocol") && value.eq_ignore_ascii_case("redis")
+        });
+        let grpc = message.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("lens-protocol") && value.eq_ignore_ascii_case("grpc")
+        });
         let sql_body = postgres
             && message.headers.iter().any(|(name, value)| {
                 name.eq_ignore_ascii_case("lens-content") && value.eq_ignore_ascii_case("sql")
             });
 
-        let mut redacted = redact_start_line(&mut message.start_line);
+        let mut redacted = if redis {
+            redact_redis(&mut message)
+        } else {
+            redact_start_line(&mut message.start_line)
+        };
         for (name, value) in &mut message.headers {
             if is_sensitive_name(name) && value != REPLACEMENT {
                 *value = REPLACEMENT.to_string();
@@ -79,6 +89,29 @@ impl Redactor {
                     redacted = true;
                 }
             }
+            return RedactionOutcome { message, redacted };
+        }
+
+        if redis {
+            let response_value = message.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("lens-content")
+                    && value.eq_ignore_ascii_case("redis-value")
+            });
+            if response_value && !message.body.is_empty() {
+                message.body = REPLACEMENT.as_bytes().to_vec();
+                redacted = true;
+            }
+            return RedactionOutcome { message, redacted };
+        }
+
+        if grpc
+            && message.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("lens-content") && value.eq_ignore_ascii_case("protobuf")
+            })
+            && !message.body.is_empty()
+        {
+            message.body = REPLACEMENT.as_bytes().to_vec();
+            redacted = true;
             return RedactionOutcome { message, redacted };
         }
 
@@ -118,6 +151,94 @@ impl Redactor {
 
         RedactionOutcome { message, redacted }
     }
+}
+
+fn redact_redis(message: &mut DecodedMessage) -> bool {
+    let command = message
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("redis-command"))
+        .map(|(_, value)| value.to_ascii_uppercase());
+    let Some(command) = command else {
+        return false;
+    };
+    let argument_indices = message
+        .headers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (name, _))| name.eq_ignore_ascii_case("redis-arg").then_some(index))
+        .collect::<Vec<_>>();
+    let arguments = argument_indices
+        .iter()
+        .map(|index| message.headers[*index].1.clone())
+        .collect::<Vec<_>>();
+    let mut changed = false;
+    for (position, header_index) in argument_indices.iter().copied().enumerate() {
+        if redis_argument_is_sensitive(&command, position, &arguments)
+            && message.headers[header_index].1 != REPLACEMENT
+        {
+            message.headers[header_index].1 = REPLACEMENT.to_string();
+            changed = true;
+        }
+    }
+    let safe_arguments = argument_indices
+        .iter()
+        .map(|index| message.headers[*index].1.as_str())
+        .collect::<Vec<_>>();
+    message.start_line = if safe_arguments.is_empty() {
+        format!("Redis {command}")
+    } else {
+        format!("Redis {command} {}", safe_arguments.join(" "))
+    };
+    changed
+}
+
+fn redis_argument_is_sensitive(command: &str, position: usize, arguments: &[String]) -> bool {
+    match command {
+        "AUTH" => return true,
+        "HELLO" => {
+            return position > 0
+                && arguments
+                    .get(position.saturating_sub(2))
+                    .is_some_and(|value| value.eq_ignore_ascii_case("AUTH"));
+        }
+        "SET" | "SETNX" | "GETSET" | "APPEND" | "SETRANGE" | "SETEX" | "PSETEX" => {
+            return position > 0;
+        }
+        "MSET" | "MSETNX" => return position % 2 == 1,
+        "HSET" | "HSETNX" | "HMSET" => {
+            return position >= 2 && position.is_multiple_of(2);
+        }
+        "JSON.SET" => return position >= 2,
+        "EVAL" | "EVALSHA" | "FCALL" | "FCALL_RO" => return true,
+        "CONFIG" => {
+            return arguments
+                .first()
+                .is_some_and(|value| value.eq_ignore_ascii_case("SET"))
+                && position >= 2;
+        }
+        "ACL" => {
+            return arguments
+                .first()
+                .is_some_and(|value| value.eq_ignore_ascii_case("SETUSER"))
+                && arguments.get(position).is_some_and(|value| {
+                    value.starts_with('>') || value.starts_with('#') || value.starts_with('<')
+                });
+        }
+        _ => {}
+    }
+    let current = arguments
+        .get(position)
+        .map(String::as_str)
+        .unwrap_or_default();
+    let previous = position
+        .checked_sub(1)
+        .and_then(|index| arguments.get(index))
+        .map(String::as_str)
+        .unwrap_or_default();
+    is_sensitive_name(current)
+        || is_sensitive_name(previous)
+        || matches!(previous.to_ascii_uppercase().as_str(), "AUTH" | "AUTH2")
 }
 
 /// Replaces PostgreSQL literal values and comment contents while preserving SQL shape.
@@ -376,6 +497,7 @@ fn is_sensitive_name(name: &str) -> bool {
             | "session_id"
             | "session-id"
             | "jwt"
+            | "grpc-message"
     ) || [
         "_password",
         "-password",
@@ -509,5 +631,87 @@ mod tests {
         let outcome = Redactor::new(true).redact(message.clone());
         assert!(!outcome.redacted);
         assert_eq!(outcome.message, message);
+    }
+
+    #[test]
+    fn redis_credentials_and_write_values_are_redacted_structurally() {
+        let auth = DecodedMessage {
+            direction: Direction::ClientToServer,
+            start_line: "Redis AUTH alice hunter2".to_string(),
+            headers: vec![
+                ("lens-protocol".to_string(), "redis".to_string()),
+                ("redis-command".to_string(), "AUTH".to_string()),
+                ("redis-arg".to_string(), "alice".to_string()),
+                ("redis-arg".to_string(), "hunter2".to_string()),
+            ],
+            body: Vec::new(),
+            truncated: false,
+        };
+        let outcome = Redactor::default().redact(auth);
+        assert!(outcome.redacted);
+        assert_eq!(
+            outcome.message.start_line,
+            "Redis AUTH [REDACTED] [REDACTED]"
+        );
+        assert!(!outcome
+            .message
+            .render()
+            .windows(7)
+            .any(|value| value == b"hunter2"));
+
+        let set = DecodedMessage {
+            direction: Direction::ClientToServer,
+            start_line: "Redis SET session:1 bearer-token EX 60".to_string(),
+            headers: vec![
+                ("lens-protocol".to_string(), "redis".to_string()),
+                ("redis-command".to_string(), "SET".to_string()),
+                ("redis-arg".to_string(), "session:1".to_string()),
+                ("redis-arg".to_string(), "bearer-token".to_string()),
+                ("redis-arg".to_string(), "EX".to_string()),
+                ("redis-arg".to_string(), "60".to_string()),
+            ],
+            body: Vec::new(),
+            truncated: false,
+        };
+        let outcome = Redactor::default().redact(set);
+        assert!(outcome
+            .message
+            .start_line
+            .starts_with("Redis SET session:1 "));
+        assert!(!outcome.message.start_line.contains("bearer-token"));
+    }
+
+    #[test]
+    fn redis_responses_and_grpc_protobuf_are_hidden_unless_revealed() {
+        let redis = DecodedMessage {
+            direction: Direction::ServerToClient,
+            start_line: "Redis bulk 12 bytes".to_string(),
+            headers: vec![
+                ("lens-protocol".to_string(), "redis".to_string()),
+                ("lens-content".to_string(), "redis-value".to_string()),
+            ],
+            body: b"private-value".to_vec(),
+            truncated: false,
+        };
+        assert_eq!(
+            Redactor::default().redact(redis).message.body,
+            b"[REDACTED]"
+        );
+
+        let grpc = DecodedMessage {
+            direction: Direction::ClientToServer,
+            start_line: "gRPC request /hello.Greeter/SayHello message 4 bytes".to_string(),
+            headers: vec![
+                ("lens-protocol".to_string(), "grpc".to_string()),
+                ("lens-content".to_string(), "protobuf".to_string()),
+            ],
+            body: vec![0x0a, 0x02, b'h', b'i'],
+            truncated: false,
+        };
+        assert_eq!(
+            Redactor::default().redact(grpc.clone()).message.body,
+            b"[REDACTED]"
+        );
+        assert_eq!(Redactor::new(true).redact(grpc.clone()).message, grpc);
     }
 }

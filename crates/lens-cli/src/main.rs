@@ -208,6 +208,9 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
             TrafficProtocol::Tcp => FixedProtocol::Tcp,
             TrafficProtocol::Postgres => FixedProtocol::Postgres,
             TrafficProtocol::Http => FixedProtocol::Http1,
+            TrafficProtocol::Http2 => FixedProtocol::Http2,
+            TrafficProtocol::Grpc => FixedProtocol::Grpc,
+            TrafficProtocol::Redis => FixedProtocol::Redis,
         })
     } else {
         match config.protocol {
@@ -222,6 +225,24 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
                     .upstream_endpoint
                     .clone()
                     .expect("PostgreSQL configuration requires an upstream"),
+            ),
+            TrafficProtocol::Redis => ProxyRuntimeConfig::redis(
+                config
+                    .upstream_endpoint
+                    .clone()
+                    .expect("Redis configuration requires an upstream"),
+            ),
+            TrafficProtocol::Http2 => ProxyRuntimeConfig::http2(
+                config
+                    .upstream_endpoint
+                    .clone()
+                    .expect("HTTP/2 configuration requires an upstream"),
+            ),
+            TrafficProtocol::Grpc => ProxyRuntimeConfig::grpc(
+                config
+                    .upstream_endpoint
+                    .clone()
+                    .expect("gRPC configuration requires an upstream"),
             ),
             TrafficProtocol::Http => match config.https_mode {
                 HttpsMode::Intercept => {
@@ -894,16 +915,22 @@ enum ProxyMode {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum TrafficProtocol {
     Http,
+    Http2,
+    Grpc,
     Tcp,
     Postgres,
+    Redis,
 }
 
 impl fmt::Display for TrafficProtocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Http => "http",
+            Self::Http2 => "http2",
+            Self::Grpc => "grpc",
             Self::Tcp => "tcp",
             Self::Postgres => "postgres",
+            Self::Redis => "redis",
         })
     }
 }
@@ -914,12 +941,15 @@ impl std::str::FromStr for TrafficProtocol {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "http" => Ok(Self::Http),
+            "http2" | "h2" => Ok(Self::Http2),
+            "grpc" => Ok(Self::Grpc),
             "tcp" => Ok(Self::Tcp),
             "postgres" | "postgresql" => Ok(Self::Postgres),
+            "redis" => Ok(Self::Redis),
             _ => Err(CliError::InvalidValue {
                 name: "--protocol".to_string(),
                 value: value.to_string(),
-                expected: "http, tcp, or postgres".to_string(),
+                expected: "http, http2, grpc, tcp, postgres, or redis".to_string(),
             }),
         }
     }
@@ -1093,7 +1123,15 @@ impl ResolvedConfig {
                     expected: "no fixed upstream when --protocol http is selected".to_string(),
                 });
             }
-            (ProxyMode::Explicit, TrafficProtocol::Tcp | TrafficProtocol::Postgres, false) => {
+            (
+                ProxyMode::Explicit,
+                TrafficProtocol::Tcp
+                | TrafficProtocol::Postgres
+                | TrafficProtocol::Redis
+                | TrafficProtocol::Http2
+                | TrafficProtocol::Grpc,
+                false,
+            ) => {
                 return Err(CliError::InvalidValue {
                     name: "--protocol".to_string(),
                     value: protocol.to_string(),
@@ -1358,7 +1396,9 @@ fn render_quickstart() -> String {
 4. Point HTTP clients at:  HTTP_PROXY=http://127.0.0.1:8888\n\
                            HTTPS_PROXY=http://127.0.0.1:8888\n\
 5. PostgreSQL locally:     lens run --protocol postgres --listen 127.0.0.1:15432 --upstream 127.0.0.1:5432\n\
-6. Safe diagnostic file:   lens run --headless --export lens-flows.jsonl\n\n\
+6. Redis locally:          lens run --protocol redis --listen 127.0.0.1:16379 --upstream 127.0.0.1:6379\n\
+7. gRPC over h2c:          lens run --protocol grpc --listen 127.0.0.1:15051 --upstream 127.0.0.1:50051\n\
+8. Safe diagnostic file:   lens run --headless --export lens-flows.jsonl\n\n\
 Windows transparent TCP (signed driver required):\n\
                            lens run --mode transparent --protocol http --listen 127.0.0.1:8888\n\n\
 TUI controls: j/k select, p protocol, s status, l latency, / search, x clear, q quit.\n\
@@ -1541,9 +1581,9 @@ COMMANDS:
 GLOBAL OPTIONS:
   --config <path>            Read simple key = value configuration
   --listen <addr:port>       Listen address [default: 127.0.0.1:8888]
-  --upstream <host:port>     Fixed target for TCP or PostgreSQL mode
+  --upstream <host:port>     Fixed target for TCP, database, HTTP/2, or gRPC mode
   --service <name>           Override the auto-detected client service label
-  --protocol <http|tcp|postgres>
+  --protocol <http|http2|grpc|tcp|postgres|redis>
                              Protocol to route and inspect [auto-detected from upstream]
   --mode <explicit|transparent>
                              How traffic reaches Lens [default: explicit]
@@ -1583,6 +1623,8 @@ EXAMPLES:
   HTTP_PROXY=http://127.0.0.1:8888 lens run --headless
   lens run --listen 127.0.0.1:8888 --upstream 127.0.0.1:8080
   lens run --protocol postgres --listen 127.0.0.1:15432 --upstream db.example.com:5432 --headless
+  lens run --protocol redis --listen 127.0.0.1:16379 --upstream 127.0.0.1:6379 --headless
+  lens run --protocol grpc --listen 127.0.0.1:15051 --upstream 127.0.0.1:50051 --headless
   lens doctor --check all
 ";
 

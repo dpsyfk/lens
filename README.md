@@ -1,6 +1,6 @@
 # Lens
 
-Lens is a local-first developer proxy for inspecting HTTP/1.1, HTTPS, and PostgreSQL traffic in a terminal. Applications opt in through `HTTP_PROXY` / `HTTPS_PROXY` or an explicit PostgreSQL connection endpoint. Lens forwards traffic independently from its bounded observation pipeline, redacts common secrets by default, and can export safe diagnostic snapshots.
+Lens is a local-first developer proxy for inspecting HTTP/1.1, HTTP/2, gRPC, PostgreSQL, and Redis traffic in a terminal. Applications opt in through `HTTP_PROXY` / `HTTPS_PROXY` or an explicit fixed-target endpoint. Lens forwards traffic independently from its bounded observation pipeline, redacts common secrets by default, and can export safe diagnostic snapshots.
 
 Lens is currently a development preview. Cross-platform release automation exists, but no signed public v0.1 release has been published yet.
 
@@ -10,13 +10,16 @@ Lens is currently a development preview. Cross-platform release automation exist
 | --- | --- |
 | HTTP | Explicit absolute-form HTTP/1.1 proxy with streaming request and response inspection |
 | HTTPS | Explicit `CONNECT` interception after local CA trust; passthrough for pinned clients |
+| HTTP/2 | HPACK-aware multiplexed stream inspection over intercepted TLS or an h2c endpoint |
+| gRPC | Service/method, message sizes, status, and per-stream latency; protobuf is redacted by default |
 | PostgreSQL | Explicit fixed-target proxy with redacted protocol metadata and query timing |
+| Redis | RESP2/RESP3 commands, replies, errors, pushes, timing, and structural credential redaction |
 | TUI | Live flow list, filtering, message inspection, latency, and drop/truncation indicators |
 | Exports | Bounded JSON and JSONL snapshots; secret export requires a separate explicit opt-in |
 | Replay | HTTP/1 request preview and guarded execution against an explicit target |
 | Platforms | Windows, macOS Intel/Apple silicon, and Linux builds exercised in CI |
 
-The process/service identity map is implemented. On Windows, Lens now has a first-party WFP driver plus crash-safe dynamic filter activation and original-destination TCP forwarding. Installing the signed driver still requires an explicit elevated step; Linux nftables and macOS PF adapters remain roadmap work. Redis, HTTP/2, gRPC, plugins, and eBPF discovery are also post-v1 work.
+The process/service identity map is implemented. On Windows, Lens now has a first-party WFP driver plus crash-safe dynamic filter activation and original-destination TCP forwarding. Installing the signed driver still requires an explicit elevated step; Linux nftables and macOS PF adapters remain roadmap work. Plugins and eBPF discovery remain later work.
 
 ## Build and check
 
@@ -65,6 +68,28 @@ lens run --protocol postgres --listen 127.0.0.1:15432 \
 ```
 
 For inspectable traffic on a trusted local hop, use a connection such as `postgresql://app@127.0.0.1:15432/app?sslmode=disable`. Lens never downgrades PostgreSQL TLS. If the client negotiates TLS, Lens forwards the encrypted session unchanged and marks it opaque.
+
+## Redis
+
+Run a local fixed-target RESP endpoint and point the application at Lens:
+
+```sh
+lens run --protocol redis --listen 127.0.0.1:16379 \
+  --upstream 127.0.0.1:6379
+```
+
+RESP2 and RESP3 commands, replies, errors, maps, sets, and push messages are decoded incrementally. `AUTH`, credential-bearing `HELLO`, ACL passwords, scripts, write values, and response payloads are masked by default. Redis TLS remains opaque in fixed-target mode; use an explicitly trusted cleartext local hop when inspection is required.
+
+## HTTP/2 and gRPC
+
+HTTPS interception advertises both `h2` and `http/1.1` through ALPN and mirrors the client's selected protocol to the upstream. For prior-knowledge cleartext HTTP/2 or gRPC, expose a dedicated Lens endpoint:
+
+```sh
+lens run --protocol http2 --listen 127.0.0.1:18080 --upstream 127.0.0.1:8080
+lens run --protocol grpc --listen 127.0.0.1:15051 --upstream 127.0.0.1:50051
+```
+
+HTTP/2 records retain bounded headers and bodies and pair latency by stream ID, so out-of-order responses remain correct. gRPC records show the service/method, direction, message size, compression flag, terminal status, and latency. Protobuf bytes are not schema-decoded and are redacted before storage unless `--reveal` is explicitly enabled; compressed messages are not decompressed. Replay remains HTTP/1-only.
 
 ## Safe capture export
 

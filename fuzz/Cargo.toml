@@ -11,7 +11,9 @@ cargo-fuzz = true
 lens-core = { path = "../crates/lens-core" }
 lens-protocol = { path = "../crates/lens-protocol" }
 lens-proto-http1 = { path = "../crates/lens-proto-http1" }
+lens-proto-http2 = { path = "../crates/lens-proto-http2" }
 lens-proto-postgres = { path = "../crates/lens-proto-postgres" }
+lens-proto-redis = { path = "../crates/lens-proto-redis" }
 libfuzzer-sys = "0.4"
 
 [[bin]]
@@ -24,6 +26,20 @@ bench = false
 [[bin]]
 name = "postgres"
 path = "fuzz_targets/postgres.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http2"
+path = "fuzz_targets/http2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "redis"
+path = "fuzz_targets/redis.rs"
 test = false
 doc = false
 bench = false
