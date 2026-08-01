@@ -188,10 +188,12 @@ jobs:
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           export SOURCE_DATE_EPOCH
           export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/lens-source"
-          CARGO_TARGET_DIR=target/repro-a cargo build --locked --release -p lens-cli --features ebpf
-          CARGO_TARGET_DIR=target/repro-b cargo build --locked --release -p lens-cli --features ebpf
-          cmp target/repro-a/release/lens target/repro-b/release/lens
-          sha256sum target/repro-a/release/lens target/repro-b/release/lens
+          CARGO_TARGET_DIR=target/repro cargo build --locked --release -p lens-cli --features ebpf
+          cp target/repro/release/lens target/lens-repro-a
+          cargo clean --target-dir target/repro
+          CARGO_TARGET_DIR=target/repro cargo build --locked --release -p lens-cli --features ebpf
+          cmp target/lens-repro-a target/repro/release/lens
+          sha256sum target/lens-repro-a target/repro/release/lens
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
