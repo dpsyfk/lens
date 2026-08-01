@@ -27,6 +27,7 @@ jobs:
       - name: Prove the metadata-only probe compiles for BPF
         shell: bash
         run: |
+          mkdir -p target
           clang -target bpf -O2 -g -Wall -Werror -c crates/lens-ebpf/src/lens-discovery.bpf.c -o target/lens-discovery.bpf.o
           readelf -S target/lens-discovery.bpf.o | grep -E 'cgroup/connect4|cgroup/connect6|sockops|\.maps'
       - name: Exercise sandbox, ABI, redaction, and portable event parsing

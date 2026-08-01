@@ -225,7 +225,7 @@ impl std::error::Error for DiscoveryError {}
 mod runtime {
     use super::*;
     use aya::{
-        maps::{Map, RingBuf},
+        maps::{MapData, RingBuf},
         programs::{CgroupAttachMode, CgroupSockAddr, SockOps},
         Ebpf,
     };
@@ -236,7 +236,7 @@ mod runtime {
     /// Active cgroup-scoped discovery session. Dropping it detaches every link.
     pub struct DiscoverySession {
         _ebpf: Ebpf,
-        ring: RingBuf<Map>,
+        ring: RingBuf<MapData>,
         cache: DiscoveryCache,
         lens_pid: u32,
         invalid_events: u64,
