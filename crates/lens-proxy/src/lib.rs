@@ -148,6 +148,12 @@ pub enum FixedProtocol {
     Postgres,
     /// HTTP/1 forwarding with bounded protocol observations.
     Http1,
+    /// HTTP/2 prior-knowledge forwarding with frame inspection.
+    Http2,
+    /// gRPC over HTTP/2 prior-knowledge forwarding.
+    Grpc,
+    /// Redis RESP2/RESP3 forwarding with command inspection.
+    Redis,
 }
 
 impl FixedProtocol {
@@ -156,6 +162,9 @@ impl FixedProtocol {
             Self::Tcp => "tcp",
             Self::Postgres => "postgres",
             Self::Http1 => "http1",
+            Self::Http2 => "http2",
+            Self::Grpc => "grpc",
+            Self::Redis => "redis",
         }
     }
 }
@@ -273,6 +282,30 @@ impl ProxyRuntimeConfig {
     pub fn postgres(upstream: Endpoint) -> Self {
         let mut config = Self::fixed(upstream);
         config.fixed_protocol = FixedProtocol::Postgres;
+        config
+    }
+
+    /// Creates fixed-target Redis forwarding settings for one upstream.
+    #[must_use]
+    pub fn redis(upstream: Endpoint) -> Self {
+        let mut config = Self::fixed(upstream);
+        config.fixed_protocol = FixedProtocol::Redis;
+        config
+    }
+
+    /// Creates fixed-target cleartext HTTP/2 forwarding settings.
+    #[must_use]
+    pub fn http2(upstream: Endpoint) -> Self {
+        let mut config = Self::fixed(upstream);
+        config.fixed_protocol = FixedProtocol::Http2;
+        config
+    }
+
+    /// Creates fixed-target cleartext gRPC forwarding settings.
+    #[must_use]
+    pub fn grpc(upstream: Endpoint) -> Self {
+        let mut config = Self::fixed(upstream);
+        config.fixed_protocol = FixedProtocol::Grpc;
         config
     }
 
@@ -658,7 +691,7 @@ async fn forward_connection(
 
     let is_connect = matches!(&route.behavior, RouteBehavior::Connect(_));
     let protocol = if is_connect && config.https_mode == HttpsMode::Intercept {
-        "http1"
+        "http"
     } else {
         route.protocol
     };
@@ -917,32 +950,6 @@ async fn intercept_connect(
         .map_err(|error| {
             CoreError::operation_failed("issue HTTPS certificate", error.to_string())
         })?;
-    let server_name = ServerName::try_from(endpoint.host.clone()).map_err(|error| {
-        CoreError::operation_failed("validate HTTPS upstream name", error.to_string())
-    })?;
-    let upstream_tls = match timeout(
-        handshake_timeout,
-        TlsConnector::from(Arc::clone(&tls.upstream)).connect(server_name, upstream),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            let _ = write_http_error(&mut client, 502, "Upstream TLS Failed").await;
-            return Err(CoreError::operation_failed(
-                "verify upstream TLS",
-                error.to_string(),
-            ));
-        }
-        Err(_) => {
-            let _ = write_http_error(&mut client, 504, "Upstream TLS Timeout").await;
-            return Err(CoreError::operation_failed(
-                "verify upstream TLS",
-                "handshake timed out",
-            ));
-        }
-    };
-
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
@@ -968,6 +975,72 @@ async fn intercept_connect(
             ));
         }
     };
+
+    let negotiated = client_tls
+        .get_ref()
+        .1
+        .alpn_protocol()
+        .unwrap_or(b"http/1.1");
+    let protocol = match negotiated {
+        b"h2" => "http2",
+        b"http/1.1" => "http1",
+        value => {
+            return Err(CoreError::operation_failed(
+                "negotiate intercepted protocol",
+                format!("unsupported ALPN value {}", String::from_utf8_lossy(value)),
+            ));
+        }
+    };
+    emit(
+        observer.as_ref(),
+        ObservationEvent::new(
+            flow_id,
+            clock.now(),
+            ObservationKind::ProtocolDetected {
+                protocol: protocol.to_string(),
+            },
+        ),
+    );
+
+    let server_name = ServerName::try_from(endpoint.host.clone()).map_err(|error| {
+        CoreError::operation_failed("validate HTTPS upstream name", error.to_string())
+    })?;
+    let mut upstream_config = tls.upstream.as_ref().clone();
+    upstream_config.alpn_protocols = vec![negotiated.to_vec()];
+    let upstream_tls = match timeout(
+        handshake_timeout,
+        TlsConnector::from(Arc::new(upstream_config)).connect(server_name, upstream),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            return Err(CoreError::operation_failed(
+                "verify upstream TLS",
+                error.to_string(),
+            ));
+        }
+        Err(_) => {
+            return Err(CoreError::operation_failed(
+                "verify upstream TLS",
+                "handshake timed out",
+            ));
+        }
+    };
+    let upstream_negotiated = upstream_tls.get_ref().1.alpn_protocol();
+    if upstream_negotiated != Some(negotiated) {
+        return Err(CoreError::operation_failed(
+            "negotiate upstream protocol",
+            format!(
+                "client selected {}, upstream selected {}",
+                String::from_utf8_lossy(negotiated),
+                upstream_negotiated.map_or_else(
+                    || "none".to_string(),
+                    |value| String::from_utf8_lossy(value).into_owned()
+                )
+            ),
+        ));
+    }
 
     mirror_bidirectional(client_tls, upstream_tls, flow_id, observer, clock, true).await
 }
@@ -1316,6 +1389,13 @@ mod tests {
     }
 
     fn test_tls_server(host: &str) -> (Arc<ServerConfig>, CertificateDer<'static>) {
+        test_tls_server_with_alpn(host, b"http/1.1")
+    }
+
+    fn test_tls_server_with_alpn(
+        host: &str,
+        alpn: &[u8],
+    ) -> (Arc<ServerConfig>, CertificateDer<'static>) {
         let generated = generate_simple_self_signed(vec![host.to_string()]).unwrap();
         let certificate = generated.cert.der().clone();
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
@@ -1325,7 +1405,7 @@ mod tests {
             .with_no_client_auth()
             .with_single_cert(vec![certificate.clone()], key)
             .unwrap();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = vec![alpn.to_vec()];
         (Arc::new(config), certificate)
     }
 
@@ -1411,6 +1491,52 @@ mod tests {
         shutdown.send(()).unwrap();
         let stats = task.await.unwrap().unwrap();
         assert_eq!((stats.accepted, stats.completed, stats.failed), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn fixed_redis_mode_forwards_and_labels_observations() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 22];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n");
+            stream.write_all(b"$5\r\nvalue\r\n").await.unwrap();
+        });
+        let (observer, mut receiver) = ObservationSink::channel(16);
+        let server = bind_server(ProxyRuntimeConfig::redis(Endpoint::new(
+            upstream_addr.ip().to_string(),
+            upstream_addr.port(),
+        )))
+        .with_observer(observer);
+        let (address, shutdown, task) = run_server(server).await;
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n")
+            .await
+            .unwrap();
+        let mut response = vec![0_u8; 11];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, b"$5\r\nvalue\r\n");
+        drop(client);
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        assert_eq!(task.await.unwrap().unwrap().completed, 1);
+
+        let mut protocol = None;
+        let mut data = 0;
+        while let Some(event) = receiver.recv().await {
+            match event.kind {
+                ObservationKind::Opened {
+                    protocol: value, ..
+                } => protocol = value,
+                ObservationKind::Data { .. } => data += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(protocol.as_deref(), Some("redis"));
+        assert_eq!(data, 2);
     }
 
     #[tokio::test]
@@ -1611,15 +1737,11 @@ mod tests {
     async fn https_interception_requires_explicit_client_trust() {
         let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream_listener.local_addr().unwrap();
-        let (upstream_config, upstream_certificate) = test_tls_server("127.0.0.1");
+        let (_upstream_config, upstream_certificate) = test_tls_server("127.0.0.1");
         let upstream_task = tokio::spawn(async move {
-            let (stream, _) = upstream_listener.accept().await.unwrap();
-            let mut stream = TlsAcceptor::from(upstream_config)
-                .accept(stream)
-                .await
-                .unwrap();
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
             let mut byte = [0_u8; 1];
-            let _ = stream.read(&mut byte).await;
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
         });
         let temporary = tempfile::tempdir().unwrap();
         let (_authority, interception) =
@@ -1733,6 +1855,9 @@ mod tests {
                 ObservationKind::Opened { protocol, .. } => {
                     opened_as_http |= protocol.as_deref() == Some("http1");
                 }
+                ObservationKind::ProtocolDetected { protocol } => {
+                    opened_as_http |= protocol == "http1";
+                }
                 ObservationKind::Data { direction, bytes } => match direction {
                     Direction::ClientToServer => client_data.extend(bytes),
                     Direction::ServerToClient => server_data.extend(bytes),
@@ -1744,6 +1869,79 @@ mod tests {
         assert!(opened_as_http);
         assert!(client_data.starts_with(b"GET /secure HTTP/1.1"));
         assert!(server_data.starts_with(b"HTTP/1.1 200 OK"));
+    }
+
+    #[tokio::test]
+    async fn intercepted_tls_mirrors_the_clients_http2_alpn_upstream() {
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let (upstream_config, upstream_certificate) = test_tls_server_with_alpn("127.0.0.1", b"h2");
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream_listener.accept().await.unwrap();
+            let mut stream = TlsAcceptor::from(upstream_config)
+                .accept(stream)
+                .await
+                .unwrap();
+            assert_eq!(stream.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+            let mut preface = [0_u8; 24];
+            stream.read_exact(&mut preface).await.unwrap();
+            assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+            stream
+                .write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+        });
+        let temporary = tempfile::tempdir().unwrap();
+        let (authority, interception) =
+            test_tls_interception(temporary.path(), upstream_certificate);
+        let (observer, mut receiver) = ObservationSink::channel(32);
+        let server = bind_server(ProxyRuntimeConfig::http().with_tls_interception(interception))
+            .with_observer(observer);
+        let (address, shutdown, task) = run_server(server).await;
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(
+                format!("CONNECT {upstream_addr} HTTP/1.1\r\nHost: {upstream_addr}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        assert!(String::from_utf8(read_head(&mut client).await)
+            .unwrap()
+            .starts_with("HTTP/1.1 200"));
+
+        let mut roots = RootCertStore::empty();
+        roots.add(authority.certificate_der()).unwrap();
+        let mut client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"h2".to_vec()];
+        let server_name = ServerName::try_from("127.0.0.1".to_string()).unwrap();
+        let mut client = TlsConnector::from(Arc::new(client_config))
+            .connect(server_name, client)
+            .await
+            .unwrap();
+        assert_eq!(client.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+        client
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .await
+            .unwrap();
+        let mut settings = [0_u8; 9];
+        client.read_exact(&mut settings).await.unwrap();
+        assert_eq!(settings, [0, 0, 0, 4, 0, 0, 0, 0, 0]);
+        drop(client);
+
+        upstream_task.await.unwrap();
+        shutdown.send(()).unwrap();
+        assert_eq!(task.await.unwrap().unwrap().completed, 1);
+        let mut detected = false;
+        while let Some(event) = receiver.recv().await {
+            if let ObservationKind::ProtocolDetected { protocol } = event.kind {
+                detected |= protocol == "http2";
+            }
+        }
+        assert!(detected);
     }
 
     #[tokio::test]

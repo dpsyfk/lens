@@ -22,6 +22,9 @@ Record the release tag, artifact name, operating-system version, terminal, shell
 - [ ] Authorization, cookie, query-secret, and body-secret values are masked in the TUI and a JSONL export.
 - [ ] A pinned-TLS client works with `--https passthrough` and is shown as opaque.
 - [ ] A PostgreSQL client configured for the Lens endpoint produces redacted query metadata without behavior changes.
+- [ ] A Redis client configured for the Lens endpoint preserves pipelining and masks authentication, write, and response values.
+- [ ] An HTTP/2 client produces stream-correct request/response timing, including out-of-order responses.
+- [ ] A gRPC client shows method, message size, terminal status, and latency without persisting protobuf payloads by default.
 - [ ] Saturating or malformed traffic does not terminate Lens or block application traffic.
 - [ ] `lens cert uninstall` removes trust, and the operating system no longer trusts a Lens-issued leaf certificate.
 
@@ -36,12 +39,16 @@ CPU architecture:
 Terminal and shell:
 HTTP client/application:
 PostgreSQL client/application:
+Redis client/application:
+HTTP/2 or gRPC client/application:
 
 Install and first-run: pass/fail
 TUI and terminal restoration: pass/fail
 HTTP forwarding and inspection: pass/fail
 HTTPS trust/interception/uninstall: pass/fail
 PostgreSQL forwarding and inspection: pass/fail
+Redis forwarding and inspection: pass/fail
+HTTP/2 and gRPC inspection: pass/fail
 Default redaction and safe export: pass/fail
 Fault/overload behavior: pass/fail
 

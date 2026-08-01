@@ -5,7 +5,7 @@ Lens is a local-first, proxy-first observability tool. The default product obser
 
 The central design goal is simple: forwarding must stay fast and reliable even when inspection, storage, decoding, or the UI fall behind.
 
-This document contains both implemented architecture and deliberately marked extension seams. The current implementation supports the explicit proxy path, HTTP/1 and PostgreSQL decoders, TLS interception, redaction, bounded storage, TUI, exports, guarded HTTP replay, and process/service identity. Windows transparent TCP mode uses a first-party WFP driver, a dynamic user-mode policy transaction, and original-destination socket context. Driver installation/signing and the Linux/macOS adapters remain separate platform work. Plugins and eBPF discovery remain planned.
+This document contains both implemented architecture and deliberately marked extension seams. The current implementation supports the explicit proxy path, HTTP/1, HTTP/2, gRPC, PostgreSQL, and Redis decoders, TLS interception, redaction, bounded storage, TUI, exports, guarded HTTP replay, and process/service identity. Windows transparent TCP mode uses a first-party WFP driver, a dynamic user-mode policy transaction, and original-destination socket context. Driver installation/signing and the Linux/macOS adapters remain separate platform work. Plugins and eBPF discovery remain planned.
 
 ## Internal Event Pipeline
 ### Decision
@@ -54,7 +54,7 @@ The codebase is split by responsibility:
 - `lens-proxy` for connection management and traffic forwarding
 - `lens-tls` for CA generation, signing, and trust-store integration
 - `lens-protocol` for decoder contracts and registry logic
-- `lens-proto-http1` and `lens-proto-postgres` for reference decoders
+- `lens-proto-http1`, `lens-proto-http2`, `lens-proto-postgres`, and `lens-proto-redis` for bounded streaming decoders
 - `lens-redact` for masking and reveal controls
 - `lens-replay` for bounded capture loading, replay safety policy, execution, and comparison
 - `lens-store` for bounded flow storage, indexing, and snapshots
@@ -73,6 +73,8 @@ The codebase is split by responsibility:
 ## Protocol Decoder Architecture
 ### Decision
 Decoders are streaming state machines. They detect protocols from early bytes and metadata, then decode incrementally from partial buffers. Each flow keeps independent per-direction decoder state. The public decoder contract must support partial reads, explicit "need more" states, and recoverable desync states.
+
+HTTP/2 retains independent HPACK state per direction and associates request timing with stream identifiers rather than connection order. gRPC is recognized from HTTP/2 content type and framed incrementally across DATA boundaries; protobuf bodies are treated as opaque sensitive data. Redis uses bounded RESP2/RESP3 nesting and aggregate limits. Oversized observation frames degrade the affected flow and never participate in forwarding.
 
 ### Trade-offs
 - Streaming decoders are harder to author than whole-message parsers.

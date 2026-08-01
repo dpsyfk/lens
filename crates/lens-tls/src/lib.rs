@@ -260,7 +260,7 @@ impl CertificateAuthority {
         Ok(&self.paths.client_bundle)
     }
 
-    /// Returns a cached or newly issued HTTP/1.1 server configuration for `host`.
+    /// Returns a cached or newly issued HTTP/2 and HTTP/1.1 server configuration for `host`.
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>, TlsError> {
         let host = normalize_host(host)?;
         let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
@@ -295,7 +295,7 @@ impl CertificateAuthority {
                 private_key,
             )
             .map_err(|error| TlsError::source("build TLS server configuration", error))?;
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let config = Arc::new(config);
         cache.insert(host, Arc::clone(&config));
         Ok(config)
@@ -317,7 +317,7 @@ pub fn platform_client_config() -> Result<Arc<ClientConfig>, TlsError> {
     ensure_crypto_provider();
     let mut config = ClientConfig::with_platform_verifier()
         .map_err(|error| TlsError::source("configure platform TLS verifier", error))?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(config))
 }
 

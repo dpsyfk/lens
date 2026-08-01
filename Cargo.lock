@@ -414,6 +414,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "httlib-hpack"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40cf60e5e8567c6ff914a590f1452821de9377a560338a562e570a6ff052aae3"
+dependencies = [
+ "httlib-huffman",
+]
+
+[[package]]
+name = "httlib-huffman"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a9fcbcc408c5526c3ab80d534e5c86e7967c1fb7aa0a8c76abd1edc27deb877"
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -670,7 +685,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lens-proto-http2"
+version = "0.1.0"
+dependencies = [
+ "httlib-hpack",
+ "lens-core",
+ "lens-protocol",
+]
+
+[[package]]
 name = "lens-proto-postgres"
+version = "0.1.0"
+dependencies = [
+ "lens-core",
+ "lens-protocol",
+]
+
+[[package]]
+name = "lens-proto-redis"
 version = "0.1.0"
 dependencies = [
  "lens-core",
@@ -723,9 +755,12 @@ name = "lens-store"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "httlib-hpack",
  "lens-core",
  "lens-proto-http1",
+ "lens-proto-http2",
  "lens-proto-postgres",
+ "lens-proto-redis",
  "lens-protocol",
  "lens-redact",
  "tokio",

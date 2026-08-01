@@ -31,6 +31,18 @@ Start with `lens doctor --check all`; it reports the effective configuration, pl
 
 Lens never weakens database TLS. For inspection on a trusted local hop, point the client at the Lens endpoint with `sslmode=disable`. Across an untrusted network, retain PostgreSQL TLS and accept that the payload is opaque, or connect through a trusted encrypted tunnel.
 
+## Redis traffic is missing or opaque
+
+Use a fixed endpoint with `--protocol redis --upstream HOST:PORT` and point the client at the Lens listener. Redis TLS is forwarded but not terminated in fixed-target mode, so encrypted RESP cannot be decoded. RESP frames larger than the bounded observation buffer are skipped with a decoder warning while forwarding continues.
+
+## HTTP/2 or gRPC is not decoded
+
+- For TLS, confirm the client advertises `h2` through ALPN and honors `HTTPS_PROXY`; several gRPC libraries require their own proxy configuration.
+- For a direct local endpoint, select `--protocol http2` or `--protocol grpc` and configure the client for prior-knowledge cleartext HTTP/2 (h2c).
+- Lens does not translate between HTTP/1.1 and HTTP/2. The ALPN protocol selected by the client must also be supported by the upstream.
+- Protobuf schemas are not loaded. Default captures intentionally replace protobuf bodies with `[REDACTED]`; `--reveal` exposes only bounded raw bytes.
+- Oversized HTTP/2 frames or header blocks are skipped by the observation decoder and reported as a per-flow warning without stopping forwarding.
+
 ## The TUI is corrupted or input is not restored
 
 Press Ctrl-C once and reset the terminal using the shell's normal reset command if necessary. Reproduce with the terminal name, shell, operating-system version, and whether stdout was redirected. Headless mode is the safe fallback for unsupported terminals.
