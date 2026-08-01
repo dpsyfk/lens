@@ -223,14 +223,38 @@ The review assumes the product intentionally handles decrypted traffic in a loca
 #### Mitigations
 - use a sandboxed WASM host
 - require explicit installation, never auto-load from CWD
-- enforce fuel, epoch, and memory limits
-- restrict ambient capabilities
+- enforce fuel, memory, module, input, output, and retained-annotation limits
+- reject every import, including WASI, so ABI v1 has no ambient capabilities
 - version the plugin ABI
-- validate plugin metadata before enabling it
-- expose clear permissions and claims to the user
+- validate ABI exports, metadata, and the installed SHA-256 before enabling it
+- independently apply default redaction to plugin input even when the local UI uses reveal mode
+- instantiate per call and contain traps or fuel exhaustion to the affected observation
 
 #### Residual risk
-- plugins are inherently untrusted code, so the sandbox is a containment layer, not a guarantee of zero risk.
+- plugins are inherently untrusted code, so the sandbox is a containment layer, not a guarantee of zero risk. SHA-256 integrity does not authenticate a publisher.
+
+### 7a. Linux eBPF discovery
+#### Surface
+- embedded cgroup connect and socket-operations programs
+- privileged load and attach lifecycle
+- fixed-width ring-buffer event ABI
+- process and connection metadata
+
+#### Risks
+- excessive observation scope or unauthorized process monitoring
+- verifier or kernel incompatibility
+- stale or incorrect identity attribution
+- persistent kernel programs after a crash
+
+#### Mitigations
+- explicit cgroup path and no automatic elevation, cgroup changes, or filesystem mounts
+- metadata only: no payload, command-line, environment, or file access
+- socket-cookie handoff followed by exact completed local tuple matching
+- pointer-free fixed-size parser, bounded ring buffer/cache, and Lens PID exclusion
+- process-owned unpinned links/maps detach on exit; failure to attach aborts only the requested discovery-enabled startup
+
+#### Residual risk
+- eBPF executes in a privileged kernel facility. Kernel version, policy, authorization, and narrow cgroup selection remain operator responsibilities.
 
 ### 8. Configuration attacks
 #### Surface

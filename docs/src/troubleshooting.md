@@ -51,6 +51,21 @@ Press Ctrl-C once and reset the terminal using the shell's normal reset command 
 
 Lens bounds retained flows, bodies, and observation queues. The TUI header and final counters report evictions, truncation, and dropped observations. Increase limits only for controlled development traffic; forwarding deliberately continues when observation is saturated.
 
+## A plugin will not install or run
+
+- `lens plugin install` rejects imports, missing/wrong ABI exports, modules larger than 4 MiB, invalid names, and an existing installation name.
+- `lens doctor --check plugins` verifies installed manifests and SHA-256 values. Remove and reinstall a module whose bytes changed.
+- Plugins stay disabled without `--enable-plugins`. Fuel/memory/output violations increment the flow's contained plugin failure count.
+- ABI v1 has no WASI or other host calls. A module that expects filesystem, network, clocks, environment, or randomness is intentionally incompatible.
+
+## Linux eBPF discovery is unavailable
+
+- Run `lens doctor --check discovery`. The binary must be a Linux build with the `ebpf` feature.
+- Confirm the selected cgroup v2 directory exists and is the intended observation scope.
+- Loading and attaching normally requires root or appropriate BPF/network administration capabilities. Lens never elevates itself.
+- Older kernels or locked-down BPF policy may reject the probe. Run without `--ebpf-cgroup` to use the portable process resolver.
+- Discovery collects connection/process metadata only. It does not make HTTPS plaintext visible or enable transparent routing.
+
 ## Preparing a safe report
 
 Export without `--reveal`, include `lens doctor --check all`, and remove unrelated endpoints if necessary. Never publish CA private-key material, database credentials, authorization headers, cookies, or a reveal-mode export.

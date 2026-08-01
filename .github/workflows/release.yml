@@ -31,18 +31,22 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: lens
             archive: tar.gz
+            cargo_features: --features ebpf
           - os: macos-latest
             target: x86_64-apple-darwin
             binary: lens
             archive: zip
+            cargo_features: ""
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: lens
             archive: zip
+            cargo_features: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: lens.exe
             archive: zip
+            cargo_features: ""
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -73,7 +77,7 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build locked release binary
-        run: cargo build --locked --release -p lens-cli --target ${{ matrix.target }}
+        run: cargo build --locked --release -p lens-cli --target ${{ matrix.target }} ${{ matrix.cargo_features }}
       - name: Require Windows Authenticode credentials for a tagged release
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
         shell: pwsh
@@ -183,8 +187,8 @@ jobs:
         run: |
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           export SOURCE_DATE_EPOCH
-          CARGO_TARGET_DIR=target/repro-a cargo build --locked --release -p lens-cli
-          CARGO_TARGET_DIR=target/repro-b cargo build --locked --release -p lens-cli
+          CARGO_TARGET_DIR=target/repro-a cargo build --locked --release -p lens-cli --features ebpf
+          CARGO_TARGET_DIR=target/repro-b cargo build --locked --release -p lens-cli --features ebpf
           cmp target/repro-a/release/lens target/repro-b/release/lens
           sha256sum target/repro-a/release/lens target/repro-b/release/lens
 

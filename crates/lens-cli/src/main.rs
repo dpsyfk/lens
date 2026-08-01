@@ -6,14 +6,16 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lens_core::{Endpoint, RunId};
+use lens_ebpf::{DiscoveryConfig, DiscoverySession};
 use lens_platform::{
     redirect_context_from_raw_socket, PlatformKind, ProcessResolver, TransparentConfig,
     TransparentController, TrustState, UserTrustStore,
 };
+use lens_plugin::PluginDirectory;
 use lens_proxy::{
     FixedProtocol, FlowIdentityLookup, FlowTargetLookup, HttpsMode, ListenerConfig,
     ObservationSink, ProxyListener, ProxyMode as ProxyListenMode, ProxyRuntimeConfig, ProxyServer,
@@ -76,6 +78,9 @@ where
     if matches!(parsed.command, Command::Replay) {
         return run_replay_command(&parsed.replay, bind_listener);
     }
+    if let Command::Plugin { action } = &parsed.command {
+        return run_plugin_command(*action, &parsed.plugin, bind_listener);
+    }
 
     let file_values = match &parsed.config_path {
         Some(path) => Some(parse_config_file(
@@ -91,10 +96,122 @@ where
         Command::Run => run_proxy_session(&config, bind_listener),
         Command::Doctor { check } => Ok(render_doctor_report(&config, check)),
         Command::Cert { action } => run_cert_command(action, bind_listener),
-        Command::Help | Command::Version | Command::Quickstart | Command::Replay => {
+        Command::Help
+        | Command::Version
+        | Command::Quickstart
+        | Command::Replay
+        | Command::Plugin { .. } => {
             unreachable!("handled before configuration")
         }
     }
+}
+
+fn run_plugin_command(
+    action: PluginAction,
+    options: &PluginArgs,
+    execute: bool,
+) -> Result<String, CliError> {
+    let root = options.directory.clone().unwrap_or_else(default_plugin_dir);
+    let directory = PluginDirectory::at(&root);
+    match action {
+        PluginAction::List => {
+            let plugins = directory
+                .list()
+                .map_err(|error| CliError::Plugin(error.to_string()))?;
+            let entries = plugins
+                .iter()
+                .map(|plugin| {
+                    format!(
+                        "{} {} abi={} sha256={}",
+                        plugin.name, plugin.version, plugin.abi_version, plugin.sha256
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(format!(
+                "lens plugin list\ndirectory: {}\nplugins: {}{}",
+                root.display(),
+                plugins.len(),
+                if entries.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{entries}")
+                }
+            ))
+        }
+        PluginAction::Install => {
+            let source = options
+                .file
+                .as_deref()
+                .expect("plugin file validated during parsing");
+            let name = options
+                .name
+                .as_deref()
+                .expect("plugin name validated during parsing");
+            let version = options
+                .version
+                .as_deref()
+                .expect("plugin version validated during parsing");
+            if !execute {
+                return Ok(format!(
+                    "lens plugin install\nname: {name}\nversion: {version}\nsource: {}\ndirectory: {}\nstatus: dry-run; no files written",
+                    source.display(),
+                    root.display()
+                ));
+            }
+            let manifest = directory
+                .install(source, name, version)
+                .map_err(|error| CliError::Plugin(error.to_string()))?;
+            Ok(format!(
+                "lens plugin install\nname: {}\nversion: {}\nabi: {}\nsha256: {}\ndirectory: {}\nstatus: installed; disabled until --enable-plugins",
+                manifest.name,
+                manifest.version,
+                manifest.abi_version,
+                manifest.sha256,
+                root.display()
+            ))
+        }
+        PluginAction::Remove => {
+            let name = options
+                .name
+                .as_deref()
+                .expect("plugin name validated during parsing");
+            if !execute {
+                return Ok(format!(
+                    "lens plugin remove\nname: {name}\ndirectory: {}\nstatus: dry-run; no files removed",
+                    root.display()
+                ));
+            }
+            directory
+                .remove(name)
+                .map_err(|error| CliError::Plugin(error.to_string()))?;
+            Ok(format!(
+                "lens plugin remove\nname: {name}\ndirectory: {}\nstatus: removed",
+                root.display()
+            ))
+        }
+    }
+}
+
+fn default_plugin_dir() -> PathBuf {
+    if let Some(path) = env::var_os("LENS_PLUGIN_DIR") {
+        return PathBuf::from(path);
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(path) = env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(path).join("Lens").join("plugins");
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Some(path) = env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(path).join("lens").join("plugins");
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local")
+        .join("share")
+        .join("lens")
+        .join("plugins")
 }
 
 fn run_replay_command(options: &ReplayArgs, allow_network: bool) -> Result<String, CliError> {
@@ -261,17 +378,37 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         }
     };
     let (observer, observations) = ObservationSink::channel(1024);
-    let (store_actor, store_handle) = StoreActor::with_inspection(
+    let (mut store_actor, store_handle) = StoreActor::with_inspection(
         config.max_flows,
         RunId::new(1),
         config.max_body,
         config.reveal,
     );
+    if config.enable_plugins {
+        let host = PluginDirectory::at(&config.plugin_dir)
+            .load()
+            .map_err(|error| CliError::Plugin(error.to_string()))?;
+        store_actor = store_actor.with_plugins(host);
+    }
     let mut server = runtime
         .block_on(async { ProxyServer::from_listener(listener, runtime_config) })
         .map_err(|error| CliError::ProxyFailed(error.to_string()))?;
     let process_resolver = ProcessResolver::current(config.service.clone());
+    let discovery = config
+        .ebpf_cgroup
+        .as_ref()
+        .map(|cgroup| DiscoverySession::start(DiscoveryConfig::new(cgroup)))
+        .transpose()
+        .map_err(|error| CliError::Discovery(error.to_string()))?
+        .map(|session| Arc::new(Mutex::new(session)));
     let identity_lookup = FlowIdentityLookup::new(move |client, listener| {
+        if let Some(discovery) = &discovery {
+            let mut discovery = discovery.lock().unwrap_or_else(|error| error.into_inner());
+            discovery.poll(64);
+            if let Some(identity) = discovery.cache_mut().take_identity(client) {
+                return Some(identity);
+            }
+        }
         process_resolver.resolve(client, listener).identity
     });
     server = server
@@ -540,6 +677,7 @@ struct Cli {
     config_path: Option<PathBuf>,
     flags: ConfigValues,
     replay: ReplayArgs,
+    plugin: PluginArgs,
 }
 
 impl Cli {
@@ -553,12 +691,20 @@ impl Cli {
         let mut config_path = None;
         let mut flags = ConfigValues::default();
         let mut replay = ReplayArgs::default();
+        let mut plugin = PluginArgs::default();
         let mut args = raw_args.into_iter().map(Into::into).peekable();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "run" => set_command(&mut command, Command::Run)?,
                 "replay" => set_command(&mut command, Command::Replay)?,
+                "plugin" => {
+                    let action = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("plugin action".to_string()))?
+                        .parse()?;
+                    set_command(&mut command, Command::Plugin { action })?;
+                }
                 "doctor" => set_command(
                     &mut command,
                     Command::Doctor {
@@ -645,6 +791,41 @@ impl Cli {
                     flags.export_format = Some(value.parse()?);
                 }
                 "--allow-secret-export" => flags.allow_secret_export = Some(true),
+                "--enable-plugins" => flags.enable_plugins = Some(true),
+                "--plugin-dir" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::MissingValue("--plugin-dir".to_string()))?;
+                    flags.plugin_dir = Some(value.clone());
+                    plugin.directory = Some(PathBuf::from(value));
+                }
+                "--ebpf-cgroup" => {
+                    flags.ebpf_cgroup = Some(
+                        args.next()
+                            .ok_or_else(|| CliError::MissingValue("--ebpf-cgroup".to_string()))?,
+                    );
+                }
+                "--file" => {
+                    plugin.used = true;
+                    plugin.file =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            CliError::MissingValue("--file".to_string())
+                        })?));
+                }
+                "--name" => {
+                    plugin.used = true;
+                    plugin.name = Some(
+                        args.next()
+                            .ok_or_else(|| CliError::MissingValue("--name".to_string()))?,
+                    );
+                }
+                "--plugin-version" => {
+                    plugin.used = true;
+                    plugin.version =
+                        Some(args.next().ok_or_else(|| {
+                            CliError::MissingValue("--plugin-version".to_string())
+                        })?);
+                }
                 "--input" => {
                     replay.used = true;
                     replay.input =
@@ -749,12 +930,41 @@ impl Cli {
                 command: "replay".to_string(),
             });
         }
+        match &command {
+            Command::Plugin {
+                action: PluginAction::Install,
+            } => {
+                if plugin.file.is_none() {
+                    return Err(CliError::MissingValue("--file".to_string()));
+                }
+                if plugin.name.is_none() {
+                    return Err(CliError::MissingValue("--name".to_string()));
+                }
+                if plugin.version.is_none() {
+                    return Err(CliError::MissingValue("--plugin-version".to_string()));
+                }
+            }
+            Command::Plugin {
+                action: PluginAction::Remove,
+            } if plugin.name.is_none() => {
+                return Err(CliError::MissingValue("--name".to_string()));
+            }
+            Command::Plugin { .. } => {}
+            _ if plugin.used => {
+                return Err(CliError::OptionRequiresCommand {
+                    option: "plugin management options".to_string(),
+                    command: "plugin".to_string(),
+                });
+            }
+            _ => {}
+        }
 
         Ok(Self {
             command,
             config_path,
             flags,
             replay,
+            plugin,
         })
     }
 }
@@ -772,9 +982,43 @@ enum Command {
     Replay,
     Doctor { check: DoctorCheck },
     Cert { action: CertAction },
+    Plugin { action: PluginAction },
     Quickstart,
     Help,
     Version,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PluginAction {
+    Install,
+    List,
+    Remove,
+}
+
+impl std::str::FromStr for PluginAction {
+    type Err = CliError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "install" => Ok(Self::Install),
+            "list" => Ok(Self::List),
+            "remove" => Ok(Self::Remove),
+            _ => Err(CliError::InvalidValue {
+                name: "plugin action".to_string(),
+                value: value.to_string(),
+                expected: "install, list, or remove".to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PluginArgs {
+    file: Option<PathBuf>,
+    name: Option<String>,
+    version: Option<String>,
+    directory: Option<PathBuf>,
+    used: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -884,6 +1128,8 @@ enum DoctorCheck {
     Trust,
     Platform,
     Transparent,
+    Plugins,
+    Discovery,
 }
 
 impl std::str::FromStr for DoctorCheck {
@@ -897,10 +1143,14 @@ impl std::str::FromStr for DoctorCheck {
             "trust" => Ok(Self::Trust),
             "platform" => Ok(Self::Platform),
             "transparent" => Ok(Self::Transparent),
+            "plugins" => Ok(Self::Plugins),
+            "discovery" | "ebpf" => Ok(Self::Discovery),
             _ => Err(CliError::InvalidValue {
                 name: "--check".to_string(),
                 value: value.to_string(),
-                expected: "all, config, network, trust, platform, or transparent".to_string(),
+                expected:
+                    "all, config, network, trust, platform, transparent, plugins, or discovery"
+                        .to_string(),
             }),
         }
     }
@@ -996,6 +1246,9 @@ struct ConfigValues {
     export: Option<String>,
     export_format: Option<ExportFormat>,
     allow_secret_export: Option<bool>,
+    enable_plugins: Option<bool>,
+    plugin_dir: Option<String>,
+    ebpf_cgroup: Option<String>,
 }
 
 impl ConfigValues {
@@ -1035,6 +1288,11 @@ impl ConfigValues {
             allow_secret_export: env_vars
                 .get("LENS_ALLOW_SECRET_EXPORT")
                 .and_then(|value| parse_bool(value).ok()),
+            enable_plugins: env_vars
+                .get("LENS_ENABLE_PLUGINS")
+                .and_then(|value| parse_bool(value).ok()),
+            plugin_dir: env_vars.get("LENS_PLUGIN_DIR").cloned(),
+            ebpf_cgroup: env_vars.get("LENS_EBPF_CGROUP").cloned(),
         }
     }
 }
@@ -1056,6 +1314,9 @@ struct ResolvedConfig {
     refresh_ms: usize,
     export: Option<PathBuf>,
     export_format: ExportFormat,
+    enable_plugins: bool,
+    plugin_dir: PathBuf,
+    ebpf_cgroup: Option<PathBuf>,
 }
 
 impl ResolvedConfig {
@@ -1214,6 +1475,23 @@ impl ResolvedConfig {
                 file.and_then(|values| values.export_format),
                 ExportFormat::default(),
             ),
+            enable_plugins: pick(
+                flags.and_then(|values| values.enable_plugins),
+                env_vars.and_then(|values| values.enable_plugins),
+                file.and_then(|values| values.enable_plugins),
+                false,
+            ),
+            plugin_dir: flags
+                .and_then(|values| values.plugin_dir.clone())
+                .or_else(|| env_vars.and_then(|values| values.plugin_dir.clone()))
+                .or_else(|| file.and_then(|values| values.plugin_dir.clone()))
+                .map(PathBuf::from)
+                .unwrap_or_else(default_plugin_dir),
+            ebpf_cgroup: flags
+                .and_then(|values| values.ebpf_cgroup.clone())
+                .or_else(|| env_vars.and_then(|values| values.ebpf_cgroup.clone()))
+                .or_else(|| file.and_then(|values| values.ebpf_cgroup.clone()))
+                .map(PathBuf::from),
         })
     }
 }
@@ -1261,6 +1539,9 @@ fn parse_config_file(contents: &str) -> ConfigValues {
             "export" => values.export = Some(value.to_string()),
             "export_format" => values.export_format = value.parse().ok(),
             "allow_secret_export" => values.allow_secret_export = parse_bool(value).ok(),
+            "enable_plugins" => values.enable_plugins = parse_bool(value).ok(),
+            "plugin_dir" => values.plugin_dir = Some(value.to_string()),
+            "ebpf_cgroup" => values.ebpf_cgroup = Some(value.to_string()),
             _ => {}
         }
     }
@@ -1361,7 +1642,7 @@ fn parse_positive_u64(name: &str, value: &str) -> Result<u64, CliError> {
 
 fn render_run_plan(config: &ResolvedConfig) -> String {
     format!(
-        "lens run\nmode: {}\nprotocol: {}\nlisten: {}\nupstream: {}\nservice: {}\nhttps: {}\nredaction: {}\nheadless: {}\nrefresh: {} ms\nexport: {} ({})\nmax_flows: {}\nmax_body: {} bytes",
+        "lens run\nmode: {}\nprotocol: {}\nlisten: {}\nupstream: {}\nservice: {}\nhttps: {}\nredaction: {}\nplugins: {} ({})\neBPF discovery: {}\nheadless: {}\nrefresh: {} ms\nexport: {} ({})\nmax_flows: {}\nmax_body: {} bytes",
         config.mode,
         config.protocol,
         config.listen,
@@ -1376,6 +1657,12 @@ fn render_run_plan(config: &ResolvedConfig) -> String {
         config.service.as_deref().unwrap_or("auto-detect"),
         config.https_mode,
         if config.reveal { "revealed" } else { "enabled" },
+        if config.enable_plugins { "enabled" } else { "disabled" },
+        config.plugin_dir.display(),
+        config
+            .ebpf_cgroup
+            .as_deref()
+            .map_or("disabled".to_string(), |path| path.display().to_string()),
         config.headless,
         config.refresh_ms,
         config
@@ -1398,9 +1685,13 @@ fn render_quickstart() -> String {
 5. PostgreSQL locally:     lens run --protocol postgres --listen 127.0.0.1:15432 --upstream 127.0.0.1:5432\n\
 6. Redis locally:          lens run --protocol redis --listen 127.0.0.1:16379 --upstream 127.0.0.1:6379\n\
 7. gRPC over h2c:          lens run --protocol grpc --listen 127.0.0.1:15051 --upstream 127.0.0.1:50051\n\
-8. Safe diagnostic file:   lens run --headless --export lens-flows.jsonl\n\n\
+8. Safe diagnostic file:   lens run --headless --export lens-flows.jsonl\n\
+9. Install a WASM plugin:  lens plugin install --file plugin.wasm --name example --plugin-version 1.0.0\n\
+10. Enable plugins:        lens run --enable-plugins\n\n\
 Windows transparent TCP (signed driver required):\n\
                            lens run --mode transparent --protocol http --listen 127.0.0.1:8888\n\n\
+Optional Linux discovery (privileged cgroup attach):\n\
+                           lens run --ebpf-cgroup /sys/fs/cgroup\n\n\
 TUI controls: j/k select, p protocol, s status, l latency, / search, x clear, q quit.\n\
 Redaction is always on unless --reveal is explicit. Secret exports additionally require --allow-secret-export."
         .to_string()
@@ -1474,6 +1765,33 @@ fn render_doctor_report(config: &ResolvedConfig, check: DoctorCheck) -> String {
             status.detail
         ));
     }
+    if matches!(check, DoctorCheck::All | DoctorCheck::Plugins) {
+        let directory = PluginDirectory::at(&config.plugin_dir);
+        let detail = match directory.list() {
+            Ok(plugins) => format!(
+                "ok; installed={}; enabled={}; directory={}",
+                plugins.len(),
+                config.enable_plugins,
+                config.plugin_dir.display()
+            ),
+            Err(error) => format!("invalid; {error}"),
+        };
+        lines.push(format!("plugins: {detail}"));
+    }
+    if matches!(check, DoctorCheck::All | DoctorCheck::Discovery) {
+        let compiled = cfg!(all(target_os = "linux", feature = "ebpf"));
+        lines.push(format!(
+            "discovery: {}; platform={}; cgroup={}; payload_capture=disabled",
+            if compiled { "available" } else { "unavailable" },
+            env::consts::OS,
+            config
+                .ebpf_cgroup
+                .as_deref()
+                .map_or("not-configured".to_string(), |path| path
+                    .display()
+                    .to_string())
+        ));
+    }
 
     lines.join("\n")
 }
@@ -1508,6 +1826,8 @@ enum CliError {
     Trust(String),
     Terminal(String),
     Replay(String),
+    Plugin(String),
+    Discovery(String),
     Export {
         path: PathBuf,
         source: String,
@@ -1553,6 +1873,8 @@ impl fmt::Display for CliError {
             Self::Trust(source) => write!(f, "lens: trust-store operation failed: {source}"),
             Self::Terminal(source) => write!(f, "lens: terminal UI failed: {source}"),
             Self::Replay(source) => write!(f, "lens replay: {source}"),
+            Self::Plugin(source) => write!(f, "lens plugin: {source}"),
+            Self::Discovery(source) => write!(f, "lens discovery: {source}"),
             Self::Export { path, source } => {
                 write!(
                     f,
@@ -1576,6 +1898,7 @@ COMMANDS:
   replay     Preview or explicitly execute one captured HTTP/1 request
   doctor     Check config, platform, trust, and network readiness
   cert       Manage the explicit local CA: install, uninstall, or status
+  plugin     Explicitly install, list, or remove capability-limited WASM plugins
   quickstart Show the first-run HTTP, HTTPS, PostgreSQL, and export path
 
 GLOBAL OPTIONS:
@@ -1597,6 +1920,9 @@ GLOBAL OPTIONS:
   --export-format <json|jsonl>
                              Snapshot format [default: jsonl]
   --allow-secret-export      Required with both --reveal and --export
+  --enable-plugins           Run verified installed plugins on redacted messages
+  --plugin-dir <path>        Explicit plugin installation directory
+  --ebpf-cgroup <path>       Linux cgroup v2 scope for metadata-only discovery
   --max-flows <n>            Maximum retained flows [default: 10000]
   --max-body <bytes>         Per-message body cap [default: 262144]
   --help                     Print help
@@ -1614,10 +1940,16 @@ REPLAY OPTIONS:
   --allow-remote             Permit a non-loopback target
   --timeout-ms <n>           Replay deadline [default: 10000]
 
+PLUGIN OPTIONS:
+  lens plugin install --file <wasm> --name <name> --plugin-version <version>
+  lens plugin list [--plugin-dir <path>]
+  lens plugin remove --name <name>
+
 EXAMPLES:
   lens
   lens cert install
   lens cert status
+  lens plugin list
   lens quickstart
   lens replay --input lens-flows.jsonl --flow 1 --target http://127.0.0.1:8080
   HTTP_PROXY=http://127.0.0.1:8888 lens run --headless
@@ -1751,6 +2083,66 @@ max_body = 64
     }
 
     #[test]
+    fn plugin_management_is_explicit_and_install_is_dry_in_unit_mode() {
+        let directory = tempdir().unwrap();
+        let output = run(
+            vec![
+                "plugin".to_string(),
+                "install".to_string(),
+                "--file".to_string(),
+                "example.wasm".to_string(),
+                "--name".to_string(),
+                "example".to_string(),
+                "--plugin-version".to_string(),
+                "1.0.0".to_string(),
+                "--plugin-dir".to_string(),
+                directory.path().display().to_string(),
+            ],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap();
+        assert!(output.contains("status: dry-run; no files written"));
+        assert!(output.contains("name: example"));
+
+        let listed = run(
+            vec![
+                "plugin".to_string(),
+                "list".to_string(),
+                "--plugin-dir".to_string(),
+                directory.path().display().to_string(),
+            ],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap();
+        assert!(listed.contains("plugins: 0"));
+    }
+
+    #[test]
+    fn plugins_and_ebpf_discovery_are_opt_in_run_settings() {
+        let directory = tempdir().unwrap();
+        let output = run(
+            vec![
+                "run".to_string(),
+                "--enable-plugins".to_string(),
+                "--plugin-dir".to_string(),
+                directory.path().display().to_string(),
+                "--ebpf-cgroup".to_string(),
+                "/sys/fs/cgroup".to_string(),
+            ],
+            &empty_env(),
+            |_| Ok(None),
+            false,
+        )
+        .unwrap();
+        assert!(output.contains("plugins: enabled"));
+        assert!(output.contains("eBPF discovery: /sys/fs/cgroup"));
+    }
+
+    #[test]
     fn replay_defaults_to_a_secret_safe_network_free_preview() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("flows.jsonl");
@@ -1844,6 +2236,8 @@ max_body = 64
         assert!(output.contains("material="));
         assert!(output.contains("platform:"));
         assert!(output.contains("transparent:"));
+        assert!(output.contains("plugins:"));
+        assert!(output.contains("discovery:"));
     }
 
     #[test]

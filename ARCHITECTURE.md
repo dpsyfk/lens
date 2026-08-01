@@ -5,7 +5,7 @@ Lens is a local-first, proxy-first observability tool. The default product obser
 
 The central design goal is simple: forwarding must stay fast and reliable even when inspection, storage, decoding, or the UI fall behind.
 
-This document contains both implemented architecture and deliberately marked extension seams. The current implementation supports the explicit proxy path, HTTP/1, HTTP/2, gRPC, PostgreSQL, and Redis decoders, TLS interception, redaction, bounded storage, TUI, exports, guarded HTTP replay, and process/service identity. Windows transparent TCP mode uses a first-party WFP driver, a dynamic user-mode policy transaction, and original-destination socket context. Driver installation/signing and the Linux/macOS adapters remain separate platform work. Plugins and eBPF discovery remain planned.
+This document contains both implemented architecture and deliberately marked extension seams. The current implementation supports the explicit proxy path, HTTP/1, HTTP/2, gRPC, PostgreSQL, and Redis decoders, TLS interception, redaction, bounded storage, TUI, exports, guarded HTTP replay, process/service identity, capability-limited WASM plugins, and optional Linux eBPF identity discovery. Windows transparent TCP mode uses a first-party WFP driver, a dynamic user-mode policy transaction, and original-destination socket context. Driver installation/signing and the Linux/macOS transparent adapters remain separate platform work.
 
 ## Internal Event Pipeline
 ### Decision
@@ -61,8 +61,8 @@ The codebase is split by responsibility:
 - `lens-platform` for OS-specific trust, process identity, and versioned transparent-redirection seams
 - `lens-tui` for rendering and input handling
 - `lens-cli` for startup, config resolution, and composition
-- `lens-plugin` as a placeholder for the planned sandboxed extension host
-- `lens-ebpf` as a placeholder for planned optional Linux discovery
+- `lens-plugin` for the import-free ABI-v1 WASM host, explicit installation, integrity checks, and resource limits
+- `lens-ebpf` for a portable bounded identity cache plus optional Linux cgroup probe/loader
 - `xtask`, `fuzz`, and benchmarks as tooling-only companions
 
 ### Trade-offs
@@ -81,14 +81,23 @@ HTTP/2 retains independent HPACK state per direction and associates request timi
 - They are the only viable choice for fragmented packets, pipelined requests, and large bodies.
 - A shared decoder contract creates a stable extension seam, but it must be versioned carefully.
 
-## Plugin System (planned)
+## Plugin System
 ### Decision
-The intended plugin system runs WASM components behind a versioned ABI. This host and ABI are not implemented yet. When implemented, plugins will be installed explicitly, sandboxed by resource limits, and denied ambient file or network access unless the host grants it. Plugin loading will remain opt-in only.
+Plugins are core WebAssembly modules behind ABI v1. Installation is explicit, existing names are never overwritten, and the stored SHA-256 is rechecked before loading. Modules with any import are rejected, so ABI v1 grants no WASI, filesystem, network, environment, time, random, or process capability. Each redacted message runs in a fresh instance with fixed module, memory, input, output, annotation-count, and fuel limits. Plugin failures stay in the observation/store plane and cannot terminate forwarding. Plugins remain disabled unless the user passes `--enable-plugins`.
 
 ### Trade-offs
 - WASM adds marshalling overhead and a larger runtime footprint.
 - The isolation boundary is worth it because plugins may process sensitive payloads.
 - Explicit installation is less convenient than auto-loading, but it is much safer.
+
+## Linux eBPF Discovery
+### Decision
+Linux release builds may load an embedded metadata-only cgroup eBPF probe after an explicit `--ebpf-cgroup` selection. Connect4/connect6 programs bind PID, UID, process name, and destination to the kernel socket cookie; a socket-operations program emits the completed local/remote tuple through a bounded ring buffer. Userspace correlates only an exact local tuple and falls back to the portable resolver when discovery is missing or ambiguous. Lens excludes its own PID. It neither captures payloads nor redirects traffic, and dropping the owning session detaches the links.
+
+### Trade-offs
+- Exact socket-cookie/tuple correlation is stronger than sampling `/proc` for short-lived clients.
+- Cgroup attachment requires Linux kernel support and privilege, so it can never be the default cross-platform path.
+- Metadata-only discovery cannot reveal encrypted traffic, provide transparent routing, or replace application opt-in.
 
 ## Memory Ownership
 ### Decision
@@ -155,7 +164,7 @@ Dependencies are passed in through constructors. The CLI is the composition root
 
 ## Extension Points
 ### Decision
-The implemented system exposes seams for protocol decoders, redaction, exports, replay, platform trust, process identity, and native redirection control records. Windows WFP source is isolated under `drivers/windows`; its user-mode policy is dynamic, so filters disappear when the Lens session closes or crashes. Linux nftables and macOS PF adapters, discovery backends, and plugins remain extension work. The default explicit build works without privileged extensions.
+The implemented system exposes seams for protocol decoders, redaction, exports, replay, platform trust, process identity, plugins, optional Linux discovery, and native redirection control records. Windows WFP source is isolated under `drivers/windows`; its user-mode policy is dynamic, so filters disappear when the Lens session closes or crashes. Linux nftables and macOS PF transparent adapters remain extension work. The default explicit build works without privileged extensions, eBPF activation, or plugin execution.
 
 ### Trade-offs
 - More seams mean more versioning and compatibility discipline.

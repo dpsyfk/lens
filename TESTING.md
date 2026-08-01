@@ -24,6 +24,8 @@ The goal is not just to prove that the code compiles. The goal is to prove that 
 Unit tests should cover pure or mostly pure logic in:
 - `lens-core`
 - `lens-redact`
+- `lens-plugin`
+- portable `lens-ebpf` event parsing and cache correlation
 - `lens-protocol`
 - protocol decoders
 - store indexing and flow aggregation logic
@@ -39,6 +41,8 @@ Unit tests should cover pure or mostly pure logic in:
 - buffer accounting and truncation rules
 - config merging order
 - error classification and formatting
+- WASM import rejection, ABI validation, fuel/memory/I/O limits, integrity checks, and trap containment
+- eBPF fixed-width IPv4/IPv6 parsing, exact tuple consumption, retention, and self-exclusion
 
 ### Trade-offs
 - Unit tests are fast and precise, but they cannot prove that the real network stack works.
@@ -56,6 +60,8 @@ Examples:
 - config loading through actual files and environment variables
 - CLI commands that interact with the filesystem and trust store abstractions
 - store-to-UI snapshot pipeline
+- redacted store-to-plugin annotations, including when the UI uses reveal mode
+- Linux compilation of the embedded cgroup probe and its expected ELF sections
 
 ### What they should assert
 - traffic forwards successfully

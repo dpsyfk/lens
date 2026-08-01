@@ -7,3 +7,10 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"
+wasmtime = { version = "47.0.3", default-features = false, features = ["cranelift", "runtime", "std"] }
+
+[dev-dependencies]
+wat = "1"

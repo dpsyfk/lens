@@ -9,9 +9,15 @@ license = "Apache-2.0"
 name = "lens"
 path = "src/main.rs"
 
+[features]
+default = []
+ebpf = ["lens-ebpf/runtime"]
+
 [dependencies]
 lens-core = { path = "../lens-core" }
+lens-ebpf = { path = "../lens-ebpf" }
 lens-platform = { path = "../lens-platform" }
+lens-plugin = { path = "../lens-plugin" }
 lens-proxy = { path = "../lens-proxy" }
 lens-replay = { path = "../lens-replay" }
 lens-store = { path = "../lens-store" }

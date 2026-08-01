@@ -5,6 +5,8 @@ on:
     paths:
       - "crates/lens-proxy/**"
       - "crates/lens-store/**"
+      - "crates/lens-plugin/**"
+      - "crates/lens-ebpf/**"
       - ".github/workflows/integration.yml"
   push:
     branches: [main]
