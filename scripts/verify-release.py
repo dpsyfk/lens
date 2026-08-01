@@ -30,6 +30,8 @@ required = {
     "QUICKSTART.md",
     "REPLAY.md",
     "TROUBLESHOOTING.md",
+    "PLUGINS.md",
+    "LINUX_DISCOVERY.md",
 }
 if not basenames.intersection(binary_names):
     raise SystemExit("release archive does not contain the Lens binary")

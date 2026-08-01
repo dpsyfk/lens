@@ -17,9 +17,11 @@ Lens is currently a development preview. Cross-platform release automation exist
 | TUI | Live flow list, filtering, message inspection, latency, and drop/truncation indicators |
 | Exports | Bounded JSON and JSONL snapshots; secret export requires a separate explicit opt-in |
 | Replay | HTTP/1 request preview and guarded execution against an explicit target |
+| Plugins | Explicitly installed ABI-v1 WASM annotations with no imports and bounded fuel/memory/I/O |
+| Linux discovery | Optional cgroup eBPF outbound TCP identity metadata; no payload capture or routing |
 | Platforms | Windows, macOS Intel/Apple silicon, and Linux builds exercised in CI |
 
-The process/service identity map is implemented. On Windows, Lens now has a first-party WFP driver plus crash-safe dynamic filter activation and original-destination TCP forwarding. Installing the signed driver still requires an explicit elevated step; Linux nftables and macOS PF adapters remain roadmap work. Plugins and eBPF discovery remain later work.
+The process/service identity map is implemented. On Windows, Lens has a first-party WFP driver plus crash-safe dynamic filter activation and original-destination TCP forwarding. Installing the signed driver still requires an explicit elevated step; Linux nftables and macOS PF adapters remain roadmap work. Linux eBPF is an optional metadata-only identity aid, not transparent capture. Plugins are explicit, capability-free WASM processors over separately redacted events.
 
 ## Build and check
 
@@ -31,6 +33,19 @@ cargo test --workspace --all-targets --all-features
 ```
 
 The executable is `target/release/lens` (`target\release\lens.exe` on Windows).
+
+Linux source builds that need eBPF discovery use `cargo build --locked --release -p lens-cli --features ebpf` and require Clang with the BPF target. Normal explicit-proxy builds stay rootless and do not require it.
+
+## Plugins and Linux discovery
+
+```sh
+lens plugin install --file ./plugin.wasm --name example --plugin-version 1.0.0
+lens run --enable-plugins
+lens doctor --check discovery
+sudo lens run --ebpf-cgroup /sys/fs/cgroup
+```
+
+Plugins never auto-load and cannot import WASI or other host capabilities. Linux discovery observes TCP tuple and process metadata only; it never reads payloads, redirects traffic, or weakens TLS. Use the narrowest development cgroup possible.
 
 ## First run
 

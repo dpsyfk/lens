@@ -1,0 +1,37 @@
+name: Extensions
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "crates/lens-plugin/**"
+      - "crates/lens-ebpf/**"
+      - "crates/lens-store/**"
+      - "crates/lens-cli/**"
+      - ".github/workflows/extensions.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox-and-ebpf-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Prove the metadata-only probe compiles for BPF
+        shell: bash
+        run: |
+          mkdir -p target
+          clang -target bpf -O2 -g -Wall -Werror -c crates/lens-ebpf/src/lens-discovery.bpf.c -o target/lens-discovery.bpf.o
+          readelf -S target/lens-discovery.bpf.o | grep -E 'cgroup/connect4|cgroup/connect6|sockops|\.maps'
+      - name: Exercise sandbox, ABI, redaction, and portable event parsing
+        run: |
+          cargo test -p lens-plugin
+          cargo test -p lens-ebpf --all-features
+          cargo test -p lens-store plugins_receive_only_redacted_messages_and_annotate_exports -- --exact

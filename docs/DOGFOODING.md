@@ -25,6 +25,10 @@ Record the release tag, artifact name, operating-system version, terminal, shell
 - [ ] A Redis client configured for the Lens endpoint preserves pipelining and masks authentication, write, and response values.
 - [ ] An HTTP/2 client produces stream-correct request/response timing, including out-of-order responses.
 - [ ] A gRPC client shows method, message size, terminal status, and latency without persisting protobuf payloads by default.
+- [ ] An ABI-v1 plugin stays disabled by default, annotates only with `--enable-plugins`, and receives redacted input even during a local reveal-mode run.
+- [ ] An importing, infinite-loop, oversized-output, or tampered plugin is rejected or contained without interrupting forwarding.
+- [ ] On Linux, explicitly scoped eBPF discovery attributes a short-lived TCP client, excludes Lens itself, reads no payload, and detaches on exit.
+- [ ] A run without plugins or `--ebpf-cgroup` behaves identically to the portable baseline.
 - [ ] Saturating or malformed traffic does not terminate Lens or block application traffic.
 - [ ] `lens cert uninstall` removes trust, and the operating system no longer trusts a Lens-issued leaf certificate.
 
@@ -49,6 +53,8 @@ HTTPS trust/interception/uninstall: pass/fail
 PostgreSQL forwarding and inspection: pass/fail
 Redis forwarding and inspection: pass/fail
 HTTP/2 and gRPC inspection: pass/fail
+WASM plugin sandbox and redaction: pass/fail
+Linux eBPF discovery (Linux report): pass/fail/not-applicable
 Default redaction and safe export: pass/fail
 Fault/overload behavior: pass/fail
 

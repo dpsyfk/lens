@@ -574,6 +574,19 @@ fn inspector_text(flow: Option<&StoredFlow>) -> Text<'static> {
             Style::default().fg(Color::DarkGray),
         )));
     }
+    for annotation in &flow.plugin_annotations {
+        lines.push(Line::from(format!(
+            "plugin {}: {}",
+            sanitize(&annotation.plugin, 64),
+            sanitize(&annotation.value, 4096)
+        )));
+    }
+    if flow.plugin_failures > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("plugin failures contained: {}", flow.plugin_failures),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     lines.push(Line::from(""));
     if flow.messages.is_empty() {
         lines.push(Line::from("No decoded messages."));
@@ -709,6 +722,8 @@ mod tests {
             failure: None,
             decoder_error: None,
             messages: vec![message],
+            plugin_annotations: Vec::new(),
+            plugin_failures: 0,
         }
     }
 

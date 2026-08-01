@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
+build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+default = []
+runtime = ["dep:aya"]
+
+[dependencies]
+lens-core = { path = "../lens-core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.14.0", optional = true }

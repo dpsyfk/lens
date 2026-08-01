@@ -8,6 +8,9 @@ This project follows Keep a Changelog conventions.
 
 ### Added
 
+- Explicitly installed, import-free ABI-v1 WASM plugins with integrity verification, always-redacted inputs, bounded annotations, fresh instances, and fuel/memory/I/O limits.
+- Optional Linux cgroup eBPF identity discovery for completed outbound TCP tuples without payload capture or traffic redirection.
+- Plugin and discovery diagnostics, TUI annotations, safe export fields, Linux probe compilation checks, and release-feature coverage.
 - Preview-first HTTP/1 replay with explicit target, side-effect, secret, redaction, and remote-target guards.
 - Binary-safe replay fields in JSON/JSONL exports plus deterministic status and body comparison.
 - Honest current-capability documentation that separates shipped source from future architecture.

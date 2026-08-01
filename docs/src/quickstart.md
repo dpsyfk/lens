@@ -93,6 +93,29 @@ The second command is an h2c endpoint; point the development gRPC client at `127
 
 Use `--headless` for a non-interactive session and `--export PATH` for a redacted JSONL diagnostic. Exports never overwrite an existing file.
 
+## Add a capability-limited plugin
+
+Install is explicit and loading remains off until requested:
+
+```sh
+lens plugin install --file ./plugin.wasm --name example --plugin-version 1.0.0
+lens plugin list
+lens run --enable-plugins
+```
+
+Plugins receive an always-redacted JSON message and can return a bounded annotation for the inspector/export. They have no imports or ambient filesystem/network capability. See [WASM plugins](plugins.md) for ABI v1.
+
+## Optional Linux connection discovery
+
+Linux release binaries can add short-lived process identity using a metadata-only cgroup eBPF probe:
+
+```sh
+lens doctor --check discovery
+sudo lens run --ebpf-cgroup /sys/fs/cgroup
+```
+
+Choose a narrower development cgroup when possible. This is privileged and opt-in; normal explicit proxy operation remains rootless. See [Linux eBPF discovery](linux-discovery.md).
+
 ## Replay one HTTP request
 
 Replay defaults to a preview and requires an explicit target:

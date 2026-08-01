@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 base64 = "0.22"
 lens-core = { path = "../lens-core" }
+lens-plugin = { path = "../lens-plugin" }
 lens-proto-http1 = { path = "../lens-proto-http1" }
 lens-proto-http2 = { path = "../lens-proto-http2" }
 lens-proto-postgres = { path = "../lens-proto-postgres" }
@@ -21,4 +22,6 @@ tokio = { version = "1.48", features = ["sync"] }
 
 [dev-dependencies]
 httlib-hpack = "0.1"
+tempfile = "3"
 tokio = { version = "1.48", features = ["macros", "rt"] }
+wat = "1"

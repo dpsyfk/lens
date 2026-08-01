@@ -9,6 +9,7 @@ use lens_core::{
     Direction, EventEnvelope, EventSource, FlowId, FlowRecord, FlowState, MessageId, MessageRecord,
     ObservationEvent, ObservationKind, RunId, Sensitivity, ServiceIdentity,
 };
+use lens_plugin::{PluginAnnotation, PluginHost};
 use lens_proto_http1::Http1Decoder;
 use lens_proto_http2::Http2Decoder;
 use lens_proto_postgres::PostgresDecoder;
@@ -32,6 +33,10 @@ pub struct StoredFlow {
     pub decoder_error: Option<String>,
     /// Redacted, body-capped messages decoded for this flow.
     pub messages: Vec<MessageRecord>,
+    /// Bounded annotations produced from already-redacted message events.
+    pub plugin_annotations: Vec<PluginAnnotation>,
+    /// Number of plugin traps or rejected outputs contained for this flow.
+    pub plugin_failures: u64,
 }
 
 impl StoredFlow {
@@ -39,7 +44,7 @@ impl StoredFlow {
     #[must_use]
     pub fn to_json_line(&self) -> String {
         format!(
-            "{{\"schema_version\":\"1.2\",\"flow_id\":{},\"client\":\"{}\",\"upstream\":\"{}\",\"identity\":{},\"protocol\":{},\"state\":\"{}\",\"client_to_upstream_bytes\":{},\"upstream_to_client_bytes\":{},\"failure\":{},\"decoder_error\":{},\"messages\":{}}}",
+            "{{\"schema_version\":\"1.3\",\"flow_id\":{},\"client\":\"{}\",\"upstream\":\"{}\",\"identity\":{},\"protocol\":{},\"state\":\"{}\",\"client_to_upstream_bytes\":{},\"upstream_to_client_bytes\":{},\"failure\":{},\"decoder_error\":{},\"plugin_annotations\":{},\"plugin_failures\":{},\"messages\":{}}}",
             self.record
                 .envelope
                 .flow_id
@@ -54,6 +59,8 @@ impl StoredFlow {
             self.upstream_to_client_bytes,
             json_string(self.failure.as_deref()),
             json_string(self.decoder_error.as_deref()),
+            plugin_annotations_json(&self.plugin_annotations),
+            self.plugin_failures,
             messages_json(&self.messages)
         )
     }
@@ -237,6 +244,8 @@ pub struct StoreActor {
     decoders: HashMap<FlowId, ProtocolDecoder>,
     pending_requests: HashMap<(FlowId, String), VecDeque<u64>>,
     redactor: Redactor,
+    plugin_redactor: Redactor,
+    plugin_host: Option<PluginHost>,
 }
 
 impl StoreActor {
@@ -267,9 +276,18 @@ impl StoreActor {
                 decoders: HashMap::new(),
                 pending_requests: HashMap::new(),
                 redactor: Redactor::new(reveal),
+                plugin_redactor: Redactor::new(false),
+                plugin_host: None,
             },
             StoreHandle { state },
         )
+    }
+
+    /// Enables explicitly selected, capability-limited plugins on redacted messages.
+    #[must_use]
+    pub fn with_plugins(mut self, host: PluginHost) -> Self {
+        self.plugin_host = Some(host);
+        self
     }
 
     /// Consumes observations until every sender is dropped.
@@ -341,6 +359,8 @@ impl StoreActor {
                     failure: None,
                     decoder_error: None,
                     messages: Vec::new(),
+                    plugin_annotations: Vec::new(),
+                    plugin_failures: 0,
                 });
                 match state
                     .flows
@@ -486,6 +506,10 @@ impl StoreActor {
             let message_id = MessageId::new(state.next_message_id);
             let direction = decoded.direction;
             let truncated = decoded.truncated;
+            let plugin_outcome = self
+                .plugin_host
+                .as_ref()
+                .map(|_| self.plugin_redactor.redact(decoded.clone()));
             let outcome = self.redactor.redact(decoded);
             let sensitivity = if self.reveal {
                 Sensitivity::Secret
@@ -507,12 +531,39 @@ impl StoreActor {
             )
             .with_truncated(truncated)
             .with_latency_nanos(latency_nanos);
+            let plugin_report =
+                self.plugin_host
+                    .as_ref()
+                    .zip(plugin_outcome)
+                    .map(|(host, safe_outcome)| {
+                        let safe_sensitivity = if safe_outcome.redacted {
+                            Sensitivity::Redacted
+                        } else {
+                            Sensitivity::Public
+                        };
+                        let safe_message = MessageRecord::new(
+                            message.envelope.clone().with_sensitivity(safe_sensitivity),
+                            safe_outcome.message.summary(),
+                            safe_outcome.message.render(),
+                        )
+                        .with_truncated(truncated)
+                        .with_latency_nanos(latency_nanos);
+                        host.process(&plugin_event_json(flow_id, &safe_message))
+                    });
             if let Some(flow) = find_flow_mut(&mut state.flows, flow_id) {
                 if decoded_protocol.as_deref() == Some("grpc") {
                     flow.record.protocol = Some("grpc".to_string());
                 }
                 flow.record.push_message_id(message_id);
                 flow.messages.push(message);
+                if let Some(report) = plugin_report {
+                    flow.plugin_failures = flow
+                        .plugin_failures
+                        .saturating_add(report.failures.len() as u64);
+                    let remaining = 32_usize.saturating_sub(flow.plugin_annotations.len());
+                    flow.plugin_annotations
+                        .extend(report.annotations.into_iter().take(remaining));
+                }
             }
         }
     }
@@ -559,6 +610,35 @@ fn messages_json(messages: &[MessageRecord]) -> String {
                 message.truncated,
                 message.latency_nanos.map_or_else(|| "null".to_string(), |value| value.to_string()),
                 message.envelope.sensitivity
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
+}
+
+fn plugin_event_json(flow_id: FlowId, message: &MessageRecord) -> Vec<u8> {
+    format!(
+        "{{\"schema_version\":\"1.0\",\"event\":\"message.decoded\",\"flow_id\":{},\"message_id\":{},\"direction\":{},\"summary\":\"{}\",\"body\":\"{}\",\"truncated\":{},\"sensitivity\":\"{}\"}}",
+        flow_id.get(),
+        message.envelope.message_id.unwrap_or_default().get(),
+        json_string(message.envelope.direction.map(|value| value.to_string()).as_deref()),
+        escape_json(&message.summary),
+        escape_json(&String::from_utf8_lossy(&message.body)),
+        message.truncated,
+        message.envelope.sensitivity
+    )
+    .into_bytes()
+}
+
+fn plugin_annotations_json(annotations: &[PluginAnnotation]) -> String {
+    let values = annotations
+        .iter()
+        .map(|annotation| {
+            format!(
+                "{{\"plugin\":\"{}\",\"value\":\"{}\"}}",
+                escape_json(&annotation.plugin),
+                escape_json(&annotation.value)
             )
         })
         .collect::<Vec<_>>()
@@ -837,7 +917,7 @@ mod tests {
         assert_eq!(flow.messages[0].envelope.sensitivity, Sensitivity::Redacted);
         assert_eq!(flow.messages[1].envelope.sensitivity, Sensitivity::Public);
         let exported = flow.to_json_line();
-        assert!(exported.contains("\"schema_version\":\"1.2\""));
+        assert!(exported.contains("\"schema_version\":\"1.3\""));
         assert!(exported.contains("\"wire_base64\":"));
         assert!(!exported.contains("query-secret"));
         assert!(!exported.contains("header-secret"));
@@ -1141,6 +1221,57 @@ mod tests {
         assert_eq!(services[0].upstreams[0].upstream, "example.test:80");
     }
 
+    #[tokio::test]
+    async fn plugins_receive_only_redacted_messages_and_annotate_exports() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("echo.wasm");
+        let module = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1 128)
+                (global $next (mut i32) (i32.const 4096))
+                (func (export "lens_abi_version") (result i32) i32.const 1)
+                (func (export "lens_alloc") (param $len i32) (result i32)
+                  (local $ptr i32)
+                  global.get $next local.tee $ptr local.get $len i32.add global.set $next
+                  local.get $ptr)
+                (func (export "lens_process") (param $ptr i32) (param $len i32) (result i64)
+                  local.get $ptr i64.extend_i32_u i64.const 32 i64.shl
+                  local.get $len i64.extend_i32_u i64.or))"#,
+        )
+        .unwrap();
+        std::fs::write(&source, module).unwrap();
+        let plugins = lens_plugin::PluginDirectory::at(temporary.path().join("plugins"));
+        plugins.install(&source, "redaction_check", "1").unwrap();
+        let host = plugins.load().unwrap();
+        let (actor, handle) = StoreActor::with_inspection(4, RunId::new(6), 4096, true);
+        let actor = actor.with_plugins(host);
+        let (sender, receiver) = mpsc::channel(8);
+        let task = tokio::spawn(actor.run(receiver));
+        sender.send(opened(1)).await.unwrap();
+        sender
+            .send(ObservationEvent::new(
+                FlowId::new(1),
+                TimestampPair::new(20, 30),
+                ObservationKind::Data {
+                    direction: Direction::ClientToServer,
+                    bytes: b"GET /private HTTP/1.1\r\nHost: example.test\r\nAuthorization: Bearer supersecret\r\n\r\n".to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let snapshot = handle.snapshot();
+        let flow = &snapshot.flows[0];
+        assert_eq!(flow.plugin_annotations.len(), 1);
+        assert_eq!(flow.plugin_failures, 0);
+        let annotation = &flow.plugin_annotations[0].value;
+        assert!(annotation.contains("[REDACTED]"));
+        assert!(!annotation.contains("supersecret"));
+        assert!(String::from_utf8_lossy(&flow.messages[0].body).contains("supersecret"));
+    }
+
     #[test]
     fn snapshot_exports_are_deterministic_and_jsonl_has_one_flow_per_line() {
         let mut snapshot = StoreSnapshot {
@@ -1161,6 +1292,8 @@ mod tests {
             failure: None,
             decoder_error: None,
             messages: Vec::new(),
+            plugin_annotations: Vec::new(),
+            plugin_failures: 0,
         });
 
         assert_eq!(snapshot.to_jsonl().lines().count(), 1);
