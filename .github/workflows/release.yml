@@ -187,6 +187,7 @@ jobs:
         run: |
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           export SOURCE_DATE_EPOCH
+          export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/lens-source"
           CARGO_TARGET_DIR=target/repro-a cargo build --locked --release -p lens-cli --features ebpf
           CARGO_TARGET_DIR=target/repro-b cargo build --locked --release -p lens-cli --features ebpf
           cmp target/repro-a/release/lens target/repro-b/release/lens
