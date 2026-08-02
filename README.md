@@ -24,11 +24,50 @@ your application  ──►  Lens  ──►  API / PostgreSQL / Redis / gRPC se
 
 The preview artifacts require a GitHub account, expire after 14 days, and are intended for evaluation on development machines. See the complete [cross-platform installation guide](docs/INSTALL.md) for macOS, Linux, source builds, updates, and removal.
 
+### GitHub Codespaces / Linux x64
+
+Prerequisites: a Linux shell and the [GitHub CLI](https://cli.github.com/) authenticated with `gh auth status`.
+
+Copy this block into the Codespaces or Linux terminal. Do not use the Windows PowerShell block in Codespaces.
+
+```sh
+mkdir -p "$HOME/.local/bin"
+
+RUN_ID="$(gh run list \
+  --repo dpsyfk/lens \
+  --workflow release.yml \
+  --status success \
+  --limit 1 \
+  --json databaseId \
+  --jq '.[0].databaseId')"
+
+test -n "$RUN_ID" || { echo "No successful Lens release workflow was found." >&2; exit 1; }
+
+ARTIFACT_DIR="${TMPDIR:-/tmp}/lens-$RUN_ID-linux-x64"
+rm -rf "$ARTIFACT_DIR"
+mkdir -p "$ARTIFACT_DIR"
+
+gh run download "$RUN_ID" \
+  --repo dpsyfk/lens \
+  --name lens-x86_64-unknown-linux-gnu \
+  --dir "$ARTIFACT_DIR"
+
+tar -xzf "$ARTIFACT_DIR"/*.tar.gz -C "$ARTIFACT_DIR"
+LENS_BIN="$(find "$ARTIFACT_DIR" -type f -name lens | head -n 1)"
+test -n "$LENS_BIN" || { echo "lens binary was not found in the downloaded artifact." >&2; exit 1; }
+
+install -m 0755 "$LENS_BIN" "$HOME/.local/bin/lens"
+export PATH="$HOME/.local/bin:$PATH"
+
+lens --version
+lens doctor --check all
+```
+
 ### Windows x64
 
 Prerequisites: PowerShell and the [GitHub CLI](https://cli.github.com/) authenticated with `gh auth status`.
 
-Copy this block into PowerShell. It downloads the latest successful Windows preview, installs `lens.exe` under your user profile, and adds `lens` to your user `PATH`:
+Copy this block into Windows PowerShell only. It downloads the latest successful Windows preview, installs `lens.exe` under your user profile, and adds `lens` to your user `PATH`:
 
 ```powershell
 $InstallRoot = "$env:LOCALAPPDATA\Programs\Lens"

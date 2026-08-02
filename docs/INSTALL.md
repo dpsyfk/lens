@@ -79,14 +79,52 @@ lens doctor --check all
 
 The current terminal sees `lens` immediately. New terminals inherit the updated user `PATH` automatically.
 
-### macOS and Linux
+### GitHub Codespaces and Linux x64
+
+Run the following block in the Codespaces or Linux terminal. It downloads the latest successful Linux preview and installs `lens` into `$HOME/.local/bin`.
+
+```sh
+mkdir -p "$HOME/.local/bin"
+
+RUN_ID="$(gh run list \
+  --repo dpsyfk/lens \
+  --workflow release.yml \
+  --status success \
+  --limit 1 \
+  --json databaseId \
+  --jq '.[0].databaseId')"
+
+test -n "$RUN_ID" || { echo "No successful Lens release workflow was found." >&2; exit 1; }
+
+ARTIFACT_DIR="${TMPDIR:-/tmp}/lens-$RUN_ID-linux-x64"
+rm -rf "$ARTIFACT_DIR"
+mkdir -p "$ARTIFACT_DIR"
+
+gh run download "$RUN_ID" \
+  --repo dpsyfk/lens \
+  --name lens-x86_64-unknown-linux-gnu \
+  --dir "$ARTIFACT_DIR"
+
+tar -xzf "$ARTIFACT_DIR"/*.tar.gz -C "$ARTIFACT_DIR"
+LENS_BIN="$(find "$ARTIFACT_DIR" -type f -name lens | head -n 1)"
+test -n "$LENS_BIN" || { echo "lens binary was not found in the downloaded artifact." >&2; exit 1; }
+
+install -m 0755 "$LENS_BIN" "$HOME/.local/bin/lens"
+export PATH="$HOME/.local/bin:$PATH"
+
+lens --version
+lens doctor --check all
+```
+
+Add `$HOME/.local/bin` to the shell profile if it is not already on `PATH`.
+
+### macOS
 
 Select the target matching the machine, download its latest artifact, extract the archive, and install the binary into a user-owned directory:
 
 ```sh
 # macOS Apple silicon: aarch64-apple-darwin
 # macOS Intel:         x86_64-apple-darwin
-# Linux x64:           x86_64-unknown-linux-gnu
 TARGET=aarch64-apple-darwin
 
 RUN_ID="$(gh run list \
@@ -106,13 +144,13 @@ gh run download "$RUN_ID" \
   --repo dpsyfk/lens \
   --name "lens-$TARGET" \
   --dir "$ARTIFACT_DIR"
-```
 
-For macOS, extract the downloaded ZIP. For Linux, extract the downloaded `.tar.gz`. Then install the extracted `lens` binary:
+unzip "$ARTIFACT_DIR"/*.zip -d "$ARTIFACT_DIR"
+LENS_BIN="$(find "$ARTIFACT_DIR" -type f -name lens | head -n 1)"
+test -n "$LENS_BIN" || { echo "lens binary was not found in the downloaded artifact." >&2; exit 1; }
 
-```sh
 mkdir -p "$HOME/.local/bin"
-install -m 0755 /path/to/extracted/lens "$HOME/.local/bin/lens"
+install -m 0755 "$LENS_BIN" "$HOME/.local/bin/lens"
 export PATH="$HOME/.local/bin:$PATH"
 
 lens --version
