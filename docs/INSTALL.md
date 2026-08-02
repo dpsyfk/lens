@@ -1,45 +1,39 @@
-# Installing Lens v0.1
+# Install Lens
 
-Lens v0.1 will be distributed as signed release archives for Windows, macOS, and Linux after the release gate passes. No signed public v0.1 release exists yet; until then, build from source or install a generated CI artifact as a development preview. Package-manager manifests remain deferred until after v1, but Windows has a first-party user-scoped installer.
+Lens is currently a development preview. Cross-platform release automation produces installable archives, but no signed public release exists because Windows Authenticode and Apple Developer ID/notarization credentials are external paid prerequisites.
 
-## Windows one-line install
+For now, choose one of these paths:
 
-After the first signed release is published, open PowerShell and run:
+1. Download the latest unsigned GitHub Actions artifact to evaluate Lens.
+2. Build from source for development.
+3. Wait for the first signed public release before wider distribution.
 
-```powershell
-irm https://raw.githubusercontent.com/dpsyfk/lens/main/install.ps1 | iex
-```
+The public installer is intentionally not documented while there is no signed release for it to install.
 
-The script selects the latest published Windows x64 release, verifies the archive against `SHA256SUMS`, requires a valid Authenticode signature on `lens.exe`, installs to `%LOCALAPPDATA%\Programs\Lens\bin`, and adds that directory to the current process and user `PATH`. No administrator access or manual directory creation is required. Rerun the same command to update; the replaced executable is retained as `lens.exe.previous` for rollback.
+## Development-preview artifacts
 
-To inspect the installer before running it:
+Preview artifacts are built from successful runs of `.github/workflows/release.yml`. They require a GitHub account, expire after 14 days, and have not received Windows Authenticode or Apple notarization approval.
 
-```powershell
-irm https://raw.githubusercontent.com/dpsyfk/lens/main/install.ps1 -OutFile install.ps1
-Get-Content .\install.ps1
-.\install.ps1
-```
-
-The installer stops without changing the existing installation if the release is missing, draft, malformed, unsigned, or fails checksum or command validation.
-
-If the installer reports that no published Lens release was found, the repository has not published the first signed release yet. Use the development preview path below until that release exists.
-
-## Windows development preview install
-
-Use this path only before the first signed release exists, or when testing an unreleased build. Release workflow artifacts are unsigned previews unless they came from a tagged signed release, require GitHub access, and can expire.
+| Platform | Actions artifact |
+| --- | --- |
+| Windows x64 | `lens-x86_64-pc-windows-msvc` |
+| macOS Apple silicon | `lens-aarch64-apple-darwin` |
+| macOS Intel | `lens-x86_64-apple-darwin` |
+| Linux x64 | `lens-x86_64-unknown-linux-gnu` |
 
 Prerequisites:
 
-- GitHub CLI authenticated with access to this repository: `gh auth status`
-- PowerShell
+- [GitHub CLI](https://cli.github.com/)
+- `gh auth status` reports an authenticated account
+- Permission to read this repository's Actions runs
 
-From any PowerShell window:
+### Windows x64
+
+Run the following block in PowerShell. It downloads the latest successful preview, copies `lens.exe` into `%LOCALAPPDATA%\Programs\Lens\bin`, and adds that directory to the user `PATH`.
 
 ```powershell
 $InstallRoot = "$env:LOCALAPPDATA\Programs\Lens"
 $Bin = Join-Path $InstallRoot "bin"
-$ArtifactDir = Join-Path $InstallRoot "_artifact"
-New-Item -ItemType Directory -Force -Path $Bin, $ArtifactDir | Out-Null
 
 $RunId = gh run list `
   --repo dpsyfk/lens `
@@ -49,90 +43,126 @@ $RunId = gh run list `
   --json databaseId `
   --jq '.[0].databaseId'
 
+if (-not $RunId) { throw "No successful Lens release workflow was found." }
+
+$ArtifactDir = Join-Path $InstallRoot "_artifact\$RunId-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $Bin, $ArtifactDir | Out-Null
+
 gh run download $RunId `
   --repo dpsyfk/lens `
   --name lens-x86_64-pc-windows-msvc `
   --dir $ArtifactDir
 
+if ($LASTEXITCODE -ne 0) { throw "Lens artifact download failed." }
+
 $LensExe = Get-ChildItem $ArtifactDir -Recurse -Filter lens.exe | Select-Object -First 1
-Copy-Item $LensExe.FullName (Join-Path $Bin "lens.exe") -Force
+if (-not $LensExe) { throw "lens.exe was not found in the downloaded artifact." }
+
+$Destination = Join-Path $Bin "lens.exe"
+if (Test-Path -LiteralPath $Destination) {
+  Copy-Item -LiteralPath $Destination -Destination "$Destination.previous" -Force
+}
+Copy-Item $LensExe.FullName $Destination -Force
+Remove-Item -LiteralPath $ArtifactDir -Recurse -Force
 
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if (($UserPath -split ";") -notcontains $Bin) {
-  [Environment]::SetEnvironmentVariable("Path", "$UserPath;$Bin", "User")
+$PathEntries = @($UserPath -split ";" | Where-Object { $_ })
+if ($PathEntries -notcontains $Bin) {
+  $NewUserPath = (@($PathEntries) + $Bin) -join ";"
+  [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
 }
-$env:Path = "$env:Path;$Bin"
+$env:Path = "$Bin;$env:Path"
 
 lens --version
 lens doctor --check all
 ```
 
-Then start Lens:
+The current terminal sees `lens` immediately. New terminals inherit the updated user `PATH` automatically.
 
-```powershell
+### macOS and Linux
+
+Select the target matching the machine, download its latest artifact, extract the archive, and install the binary into a user-owned directory:
+
+```sh
+# macOS Apple silicon: aarch64-apple-darwin
+# macOS Intel:         x86_64-apple-darwin
+# Linux x64:           x86_64-unknown-linux-gnu
+TARGET=aarch64-apple-darwin
+
+RUN_ID="$(gh run list \
+  --repo dpsyfk/lens \
+  --workflow release.yml \
+  --status success \
+  --limit 1 \
+  --json databaseId \
+  --jq '.[0].databaseId')"
+
+test -n "$RUN_ID" || { echo "No successful Lens release workflow was found." >&2; exit 1; }
+
+ARTIFACT_DIR="${TMPDIR:-/tmp}/lens-$RUN_ID-$TARGET"
+mkdir -p "$ARTIFACT_DIR"
+
+gh run download "$RUN_ID" \
+  --repo dpsyfk/lens \
+  --name "lens-$TARGET" \
+  --dir "$ARTIFACT_DIR"
+```
+
+For macOS, extract the downloaded ZIP. For Linux, extract the downloaded `.tar.gz`. Then install the extracted `lens` binary:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 0755 /path/to/extracted/lens "$HOME/.local/bin/lens"
+export PATH="$HOME/.local/bin:$PATH"
+
+lens --version
+lens doctor --check all
+```
+
+Add `$HOME/.local/bin` to the shell profile if it is not already on `PATH`. macOS will identify the preview binary as unsigned; use it only if you intentionally downloaded it from the repository workflow.
+
+## Build from source
+
+Install the stable Rust toolchain and the native compiler/linker required by the platform:
+
+```sh
+git clone https://github.com/dpsyfk/lens.git
+cd lens
+cargo build --locked --release -p lens-cli
+```
+
+The binary is `target/release/lens` or `target\release\lens.exe` on Windows. Copy it to a user-owned directory on `PATH` and verify it:
+
+```sh
+lens --version
+lens doctor --check all
 lens quickstart
+```
+
+Windows source builds require Visual Studio Build Tools with the Desktop development with C++ workload so the MSVC linker `link.exe` is available. Linux source builds that enable optional eBPF discovery use `cargo build --locked --release -p lens-cli --features ebpf` and require Clang with the BPF target.
+
+## Start the first capture
+
+Terminal 1:
+
+```sh
 lens run --listen 127.0.0.1:8888
 ```
 
-In another PowerShell window:
+Terminal 2 on PowerShell:
 
 ```powershell
 $env:HTTP_PROXY = "http://127.0.0.1:8888"
-curl http://example.com/
+curl.exe http://example.com/
 ```
 
-After the signed release is published, switch to the one-line installer. It replaces the preview binary only after checksum, signature, and command validation pass.
-
-## Manual installation
-
-### 1. Choose an artifact
-
-Download the archive for your platform from the matching GitHub release:
-
-| Platform | Artifact |
-| --- | --- |
-| Windows x64 | `lens-VERSION-x86_64-pc-windows-msvc.zip` |
-| macOS Apple silicon | `lens-VERSION-aarch64-apple-darwin.zip` |
-| macOS Intel | `lens-VERSION-x86_64-apple-darwin.zip` |
-| Linux x64 | `lens-VERSION-x86_64-unknown-linux-gnu.tar.gz` |
-
-Every release also contains `SHA256SUMS` and one `.sigstore.json` bundle for each archive and for the checksum file.
-
-Verify GitHub build provenance for the selected archive as an independent origin check:
+Terminal 2 on macOS or Linux:
 
 ```sh
-gh attestation verify lens-0.1.0-TARGET.ARCHIVE -R dpsyfk/lens
+HTTP_PROXY=http://127.0.0.1:8888 curl http://example.com/
 ```
 
-The Linux release binary includes the optional eBPF discovery backend and embedded metadata-only probe. It remains inactive unless `--ebpf-cgroup` is supplied and still requires kernel support plus permission to attach cgroup BPF programs. Other platforms retain the portable process resolver.
-
-### 2. Verify before extracting
-
-Install [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) and verify the checksum manifest:
-
-```sh
-cosign verify-blob \
-  --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity-regexp 'https://github.com/dpsyfk/lens/.github/workflows/release.yml@refs/tags/v.*' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  SHA256SUMS
-```
-
-On macOS or Linux, verify the downloaded archive with `sha256sum -c SHA256SUMS`. On Windows, compare `certutil -hashfile ARCHIVE SHA256` with the matching manifest entry. You can also verify the archive's own Sigstore bundle with the same `cosign verify-blob` command.
-
-Tagged Windows binaries are Authenticode-signed. Tagged macOS binaries are Developer ID-signed and their ZIP archives are submitted to Apple's notarization service. The release workflow refuses to create a tagged release when either native signing credential set is absent.
-
-### 3. Install the binary
-
-Extract the archive and move `lens` or `lens.exe` into a user-owned directory on `PATH`. Lens does not require administrator or root access for its default proxy path.
-
-Confirm the binary and configuration:
-
-```sh
-lens --version
-lens doctor --check all
-lens quickstart
-```
+For an application, set `HTTP_PROXY` and `HTTPS_PROXY` in the terminal that launches its development command. Applications that ignore those variables need their own proxy configuration.
 
 ## Enable HTTPS inspection explicitly
 
@@ -143,14 +173,53 @@ lens cert install
 lens doctor --check trust
 ```
 
-Remove that trust at any time with `lens cert uninstall`. Applications using certificate pinning may reject interception; use passthrough mode for those flows.
+Remove that trust at any time with `lens cert uninstall`. Applications using certificate pinning or a private trust store may reject interception; use `lens run --https passthrough` for those flows.
 
-## Start a daily session
+## Update a preview installation
+
+Stop Lens with `q` or Ctrl-C, then repeat the artifact download steps for the platform. The Windows block replaces only `%LOCALAPPDATA%\Programs\Lens\bin\lens.exe` and retains the prior binary as `lens.exe.previous` for rollback.
+
+After replacing the binary:
 
 ```sh
-lens run --listen 127.0.0.1:8888
+lens --version
+lens doctor --check all
 ```
 
-Point the application at `HTTP_PROXY=http://127.0.0.1:8888` and `HTTPS_PROXY=http://127.0.0.1:8888`. The release archive includes `QUICKSTART.md`, `REPLAY.md`, `PLUGINS.md`, `LINUX_DISCOVERY.md`, `TROUBLESHOOTING.md`, `DOGFOODING.md`, and the machine-readable dogfood report template; the same material is available in the online [quickstart](src/quickstart.md), [safe replay guide](src/export-replay.md), [plugin guide](src/plugins.md), [Linux discovery guide](src/linux-discovery.md), and [troubleshooting guide](src/troubleshooting.md).
+The user CA and configuration are stored outside the executable. A normal binary update does not require reinstalling trust; check with `lens cert status`.
 
-Release candidates are verified with the maintainer [dogfood protocol](DOGFOODING.md) before publication.
+## Uninstall
+
+Remove Lens trust first if it was installed:
+
+```sh
+lens cert uninstall
+```
+
+On Windows, close Lens and run:
+
+```powershell
+$InstallRoot = "$env:LOCALAPPDATA\Programs\Lens"
+$Bin = Join-Path $InstallRoot "bin"
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$NewUserPath = @($UserPath -split ";" | Where-Object { $_ -and $_ -ne $Bin }) -join ";"
+[Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+```
+
+On macOS or Linux, remove the installed binary from the user-owned directory, for example `rm "$HOME/.local/bin/lens"`. Remove any project proxy variables or application-specific proxy settings separately.
+
+## Signed release installation (future)
+
+When a signed release is published, the release page will contain these archives plus `SHA256SUMS`, Sigstore bundles, and GitHub build attestations:
+
+| Platform | Release archive |
+| --- | --- |
+| Windows x64 | `lens-VERSION-x86_64-pc-windows-msvc.zip` |
+| macOS Apple silicon | `lens-VERSION-aarch64-apple-darwin.zip` |
+| macOS Intel | `lens-VERSION-x86_64-apple-darwin.zip` |
+| Linux x64 | `lens-VERSION-x86_64-unknown-linux-gnu.tar.gz` |
+
+Tagged Windows binaries must be Authenticode-signed. Tagged macOS binaries must be Developer ID-signed and notarized. The release workflow refuses to publish a tagged release when either native credential set is missing.
+
+See [release safety](src/release.md) and the maintainer [dogfood protocol](DOGFOODING.md) for the publication gates.

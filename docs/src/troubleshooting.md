@@ -15,6 +15,8 @@ Start with `lens doctor --check all`; it reports the effective configuration, pl
 ## HTTP traffic does not appear
 
 - Confirm the application honors `HTTP_PROXY`; some clients require an application-specific proxy option.
+- Set `HTTP_PROXY` and `HTTPS_PROXY` in the same terminal that launches the development application so it inherits them.
+- In Windows PowerShell, run `curl.exe`, not `curl`; older PowerShell versions alias `curl` to `Invoke-WebRequest` and may fail before a request reaches Lens.
 - Use `127.0.0.1`, not a remote listener, for the normal local-first path.
 - Check that `NO_PROXY` does not include the destination.
 - Run once with `--headless` to separate application/proxy problems from terminal rendering problems.
