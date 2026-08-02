@@ -1,11 +1,11 @@
 # Upgrading Lens v0.1
 
-On Windows, rerun the one-line installer from the [installation guide](INSTALL.md). It verifies the replacement before installing it and retains the replaced executable as `lens.exe.previous` for rollback.
+No signed public release or public installer exists yet. For a development-preview installation, stop Lens and repeat the artifact download steps in the [installation guide](INSTALL.md); the Windows instructions replace the user-owned `lens.exe` and retain the prior binary as `lens.exe.previous`.
 
 ## Safe upgrade
 
 1. Read the target release notes and `CHANGELOG.md`.
-2. Download and verify the new artifact as described in `docs/INSTALL.md`.
+2. Download the new preview artifact or, after signed releases begin, verify the release artifact as described in `docs/INSTALL.md`.
 3. Stop the active Lens session with `q` or Ctrl-C and wait for the shutdown summary.
 4. Keep the previous binary until the new version passes `lens --version` and `lens doctor --check all`.
 5. Replace the binary and start a short test session against a local HTTP request before resuming daily traffic.
@@ -14,7 +14,7 @@ The user CA and configuration live outside the binary. A normal patch or minor u
 
 ## Rollback
 
-Stop Lens, restore the previously verified binary, and run `lens doctor --check all`. Safe exports are versioned JSON/JSONL diagnostics, not an input database, so rollback does not require data migration.
+Stop Lens, restore the previously verified binary, and run `lens doctor --check all`. A Windows preview installation can restore `%LOCALAPPDATA%\Programs\Lens\bin\lens.exe.previous`. Safe exports are versioned JSON/JSONL diagnostics, not an input database, so rollback does not require data migration.
 
 If a release rotates or changes the local CA format, its release notes must call that out explicitly. Remove obsolete trust with the version that created it when possible, or use the documented platform trust-store procedure.
 

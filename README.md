@@ -1,27 +1,38 @@
 # Lens
 
-Lens is a local-first developer proxy for inspecting HTTP/1.1, HTTP/2, gRPC, PostgreSQL, and Redis traffic in a terminal. Applications opt in through `HTTP_PROXY` / `HTTPS_PROXY` or an explicit fixed-target endpoint. Lens forwards traffic independently from its bounded observation pipeline, redacts common secrets by default, and can export safe diagnostic snapshots.
+**See what your application sends to APIs and databases without leaving the terminal.**
 
-Lens is currently a development preview. Cross-platform release automation exists, but no signed public v0.1 release has been published yet.
+Lens is a local-first developer proxy with a live TUI. Point a development application at Lens and it forwards the traffic, decodes supported protocols, redacts common secrets, and shows each request, response, error, and latency in real time.
 
-## Install on Windows
+> **Development preview:** the proxy and cross-platform build pipeline work, but no signed public release has been published. Until Windows and macOS signing credentials are funded and configured, install an unsigned GitHub Actions artifact or build from source. The future public installer is intentionally not advertised yet.
 
-Lens does not currently publish a normal public installer because signed Windows and macOS releases require paid external signing credentials. For now, install the latest successful development-preview artifact from GitHub Actions.
+```text
+your application  ──►  Lens  ──►  API / PostgreSQL / Redis / gRPC service
+                         │
+                         └────►  redacted live TUI or JSON/JSONL export
+```
 
-This preview path installs Lens into a user-owned directory and adds `lens` to your user `PATH`. It requires GitHub access, downloads an unsigned CI artifact, and should be replaced by the signed installer after release signing is funded and configured.
+[Install](docs/INSTALL.md) · [Quickstart](docs/src/quickstart.md) · [Troubleshooting](docs/src/troubleshooting.md) · [Architecture](ARCHITECTURE.md) · [Security](SECURITY_REVIEW.md)
 
-Prerequisites:
+## Install the development preview
 
-- GitHub CLI authenticated with access to this repository: `gh auth status`
-- PowerShell
+| Platform | Available today | Public signed install |
+| --- | --- | --- |
+| Windows x64 | Unsigned GitHub Actions artifact or source build | Not published yet |
+| macOS Apple silicon / Intel | Unsigned GitHub Actions artifact or source build | Not published yet |
+| Linux x64 | Unsigned GitHub Actions artifact or source build | Not published yet |
 
-From any PowerShell window:
+The preview artifacts require a GitHub account, expire after 14 days, and are intended for evaluation on development machines. See the complete [cross-platform installation guide](docs/INSTALL.md) for macOS, Linux, source builds, updates, and removal.
+
+### Windows x64
+
+Prerequisites: PowerShell and the [GitHub CLI](https://cli.github.com/) authenticated with `gh auth status`.
+
+Copy this block into PowerShell. It downloads the latest successful Windows preview, installs `lens.exe` under your user profile, and adds `lens` to your user `PATH`:
 
 ```powershell
 $InstallRoot = "$env:LOCALAPPDATA\Programs\Lens"
 $Bin = Join-Path $InstallRoot "bin"
-$ArtifactDir = Join-Path $InstallRoot "_artifact"
-New-Item -ItemType Directory -Force -Path $Bin, $ArtifactDir | Out-Null
 
 $RunId = gh run list `
   --repo dpsyfk/lens `
@@ -31,200 +42,198 @@ $RunId = gh run list `
   --json databaseId `
   --jq '.[0].databaseId'
 
+if (-not $RunId) { throw "No successful Lens release workflow was found." }
+
+$ArtifactDir = Join-Path $InstallRoot "_artifact\$RunId-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $Bin, $ArtifactDir | Out-Null
+
 gh run download $RunId `
   --repo dpsyfk/lens `
   --name lens-x86_64-pc-windows-msvc `
   --dir $ArtifactDir
 
+if ($LASTEXITCODE -ne 0) { throw "Lens artifact download failed." }
+
 $LensExe = Get-ChildItem $ArtifactDir -Recurse -Filter lens.exe | Select-Object -First 1
-Copy-Item $LensExe.FullName (Join-Path $Bin "lens.exe") -Force
+if (-not $LensExe) { throw "lens.exe was not found in the downloaded artifact." }
+
+$Destination = Join-Path $Bin "lens.exe"
+if (Test-Path -LiteralPath $Destination) {
+  Copy-Item -LiteralPath $Destination -Destination "$Destination.previous" -Force
+}
+Copy-Item $LensExe.FullName $Destination -Force
+Remove-Item -LiteralPath $ArtifactDir -Recurse -Force
 
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if (($UserPath -split ";") -notcontains $Bin) {
-  [Environment]::SetEnvironmentVariable("Path", "$UserPath;$Bin", "User")
+$PathEntries = @($UserPath -split ";" | Where-Object { $_ })
+if ($PathEntries -notcontains $Bin) {
+  $NewUserPath = (@($PathEntries) + $Bin) -join ";"
+  [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
 }
-$env:Path = "$env:Path;$Bin"
+$env:Path = "$Bin;$env:Path"
 
 lens --version
 lens doctor --check all
 ```
 
-Then start a session:
+After installation, `lens` works from any new PowerShell or terminal window. Windows may warn because this development artifact is not Authenticode-signed; do not redistribute it as a production release.
+
+## See your first request
+
+Open two terminals.
+
+In terminal 1, start Lens:
 
 ```powershell
-lens quickstart
 lens run --listen 127.0.0.1:8888
 ```
 
-In another PowerShell window:
+In terminal 2, send one HTTP request through it:
 
 ```powershell
 $env:HTTP_PROXY = "http://127.0.0.1:8888"
 curl.exe http://example.com/
 ```
 
-The signed public installer remains deferred until release signing credentials are available.
-
-## What works today
-
-| Capability | Current support |
-| --- | --- |
-| HTTP | Explicit absolute-form HTTP/1.1 proxy with streaming request and response inspection |
-| HTTPS | Explicit `CONNECT` interception after local CA trust; passthrough for pinned clients |
-| HTTP/2 | HPACK-aware multiplexed stream inspection over intercepted TLS or an h2c endpoint |
-| gRPC | Service/method, message sizes, status, and per-stream latency; protobuf is redacted by default |
-| PostgreSQL | Explicit fixed-target proxy with redacted protocol metadata and query timing |
-| Redis | RESP2/RESP3 commands, replies, errors, pushes, timing, and structural credential redaction |
-| TUI | Live flow list, filtering, message inspection, latency, and drop/truncation indicators |
-| Exports | Bounded JSON and JSONL snapshots; secret export requires a separate explicit opt-in |
-| Replay | HTTP/1 request preview and guarded execution against an explicit target |
-| Plugins | Explicitly installed ABI-v1 WASM annotations with no imports and bounded fuel/memory/I/O |
-| Linux discovery | Optional cgroup eBPF outbound TCP identity metadata; no payload capture or routing |
-| Platforms | Windows, macOS Intel/Apple silicon, and Linux builds, packaged-binary smoke tests, and release gates exercised in CI |
-
-The process/service identity map is implemented. On Windows, Lens has a first-party WFP driver plus crash-safe dynamic filter activation and original-destination TCP forwarding. Installing the signed driver still requires an explicit elevated step; Linux nftables and macOS PF adapters remain roadmap work. Linux eBPF is an optional metadata-only identity aid, not transparent capture. Plugins are explicit, capability-free WASM processors over separately redacted events.
-
-## Build from source
-
-Install the stable Rust toolchain, clone the repository, then run:
-
-```sh
-cargo build --locked --release -p lens-cli
-cargo test --workspace --all-targets --all-features
-```
-
-The executable is `target/release/lens` (`target\release\lens.exe` on Windows).
-
-Linux source builds that need eBPF discovery use `cargo build --locked --release -p lens-cli --features ebpf` and require Clang with the BPF target. Normal explicit-proxy builds stay rootless and do not require it.
-
-## Plugins and Linux discovery
-
-```sh
-lens plugin install --file ./plugin.wasm --name example --plugin-version 1.0.0
-lens run --enable-plugins
-lens doctor --check discovery
-sudo lens run --ebpf-cgroup /sys/fs/cgroup
-```
-
-Plugins never auto-load and cannot import WASI or other host capabilities. Linux discovery observes TCP tuple and process metadata only; it never reads payloads, redirects traffic, or weakens TLS. Use the narrowest development cgroup possible.
-
-## First run
-
-```sh
-lens quickstart
-lens doctor --check all
-lens doctor --check transparent
-lens run --mode transparent --protocol http --listen 127.0.0.1:8888
-lens run --listen 127.0.0.1:8888
-```
-
-Point a development client at Lens:
+On macOS or Linux, use:
 
 ```sh
 HTTP_PROXY=http://127.0.0.1:8888 curl http://example.com/
 ```
 
-For HTTPS inspection, explicitly install the user-scoped development CA:
+The request appears in the TUI. Select it with `j`/`k` or the arrow keys, scroll with PageUp/PageDown, and press `q` to stop Lens cleanly.
+
+## Use Lens with your own project
+
+Lens works with projects whose HTTP client supports a standard proxy or an application-specific proxy option. Set the proxy variables in the same terminal that launches the development application so the child process inherits them.
+
+PowerShell:
+
+```powershell
+$env:HTTP_PROXY = "http://127.0.0.1:8888"
+$env:HTTPS_PROXY = "http://127.0.0.1:8888"
+npm run dev                  # or: python app.py, cargo run, dotnet run, etc.
+```
+
+macOS or Linux:
 
 ```sh
+HTTP_PROXY=http://127.0.0.1:8888 \
+HTTPS_PROXY=http://127.0.0.1:8888 \
+npm run dev
+```
+
+These settings affect only that terminal and its child processes. Some SDKs, browsers, and gRPC clients ignore proxy environment variables or use their own trust store; configure their documented proxy setting when needed. Lens does not silently capture every process in its normal cross-platform mode.
+
+### Inspect HTTPS
+
+HTTPS decryption is explicit. Install the user-scoped Lens development CA, confirm trust, then launch the application with `HTTPS_PROXY` set:
+
+```powershell
 lens cert install
 lens doctor --check trust
-HTTPS_PROXY=http://127.0.0.1:8888 curl https://example.com/
+$env:HTTPS_PROXY = "http://127.0.0.1:8888"
 ```
 
-Remove trust with `lens cert uninstall`. Certificate-pinned clients must use `lens run --https passthrough`, which keeps their payload opaque.
+Remove trust with `lens cert uninstall`. Certificate-pinned clients will reject interception; run `lens run --https passthrough` for those clients and Lens will keep their encrypted payload opaque.
 
-## PostgreSQL
+### Inspect a local database or direct service
 
-Run a dedicated Lens endpoint and point the application at it:
-
-```sh
-lens run --protocol postgres --listen 127.0.0.1:15432 \
-  --upstream 127.0.0.1:5432
-```
-
-For inspectable traffic on a trusted local hop, use a connection such as `postgresql://app@127.0.0.1:15432/app?sslmode=disable`. Lens never downgrades PostgreSQL TLS. If the client negotiates TLS, Lens forwards the encrypted session unchanged and marks it opaque.
-
-## Redis
-
-Run a local fixed-target RESP endpoint and point the application at Lens:
+Direct protocols use a dedicated Lens listening port and an explicit upstream. Point the development application's connection string at the Lens port.
 
 ```sh
-lens run --protocol redis --listen 127.0.0.1:16379 \
-  --upstream 127.0.0.1:6379
-```
+# PostgreSQL: application uses 127.0.0.1:15432
+lens run --protocol postgres --listen 127.0.0.1:15432 --upstream 127.0.0.1:5432
 
-RESP2 and RESP3 commands, replies, errors, maps, sets, and push messages are decoded incrementally. `AUTH`, credential-bearing `HELLO`, ACL passwords, scripts, write values, and response payloads are masked by default. Redis TLS remains opaque in fixed-target mode; use an explicitly trusted cleartext local hop when inspection is required.
+# Redis: application uses 127.0.0.1:16379
+lens run --protocol redis --listen 127.0.0.1:16379 --upstream 127.0.0.1:6379
 
-## HTTP/2 and gRPC
-
-HTTPS interception advertises both `h2` and `http/1.1` through ALPN and mirrors the client's selected protocol to the upstream. For prior-knowledge cleartext HTTP/2 or gRPC, expose a dedicated Lens endpoint:
-
-```sh
+# Prior-knowledge HTTP/2 or gRPC over h2c
 lens run --protocol http2 --listen 127.0.0.1:18080 --upstream 127.0.0.1:8080
 lens run --protocol grpc --listen 127.0.0.1:15051 --upstream 127.0.0.1:50051
 ```
 
-HTTP/2 records retain bounded headers and bodies and pair latency by stream ID, so out-of-order responses remain correct. gRPC records show the service/method, direction, message size, compression flag, terminal status, and latency. Protobuf bytes are not schema-decoded and are redacted before storage unless `--reveal` is explicitly enabled; compressed messages are not decompressed. Replay remains HTTP/1-only.
+Lens never downgrades PostgreSQL or Redis TLS. Use a trusted cleartext local hop for inspectable database traffic, or retain TLS and accept an opaque flow.
 
-## Safe capture export
+## What you get
+
+| Capability | Current support |
+| --- | --- |
+| HTTP | Explicit absolute-form HTTP/1.1 proxy with streaming request and response inspection |
+| HTTPS | Explicit `CONNECT` interception after local CA trust; passthrough for pinned clients |
+| HTTP/2 | HPACK-aware multiplexed stream inspection over intercepted TLS or a fixed h2c endpoint |
+| gRPC | Service/method, message sizes, status, and per-stream latency; protobuf is redacted by default |
+| PostgreSQL | Fixed-target proxy with redacted protocol metadata, query shape, errors, and timing |
+| Redis | RESP2/RESP3 commands, replies, errors, pushes, timing, and structural credential redaction |
+| TUI | Live flows, filters, message inspector, service map, latency, and drop/truncation indicators |
+| Exports | Bounded JSON and JSONL snapshots; secret export requires a separate explicit opt-in |
+| Replay | HTTP/1 request preview and guarded execution against an explicit target |
+| Plugins | Explicitly installed ABI-v1 WASM annotations with no host capabilities |
+| Linux discovery | Optional cgroup eBPF process identity metadata; no payload capture or routing |
+
+### Daily commands
 
 ```sh
-lens run --headless --listen 127.0.0.1:8888 \
-  --export lens-flows.jsonl
+lens quickstart
+lens doctor --check all
+lens run --listen 127.0.0.1:8888
+lens run --headless --export lens-flows.jsonl
+lens cert status
+lens --help
 ```
 
-Exports use create-new semantics and never overwrite an existing file. Authorization, cookies, common secret headers, sensitive query/form values, JSON secrets, SQL literal values, credentials, and database result values are masked or omitted by default.
-
-The current export schema includes a binary-safe `wire_base64` representation of each already-redacted message. This permits exact replay of non-text request bodies without placing unredacted bytes into a normal capture.
-
-## HTTP replay
-
-Replay is preview-only by default and always requires an explicit target origin:
-
-```sh
-lens replay --input lens-flows.jsonl --flow 1 \
-  --target http://127.0.0.1:8080
-```
-
-After reviewing the method, target, header names, body size, sensitivity, and warnings, add `--execute` to send it. Additional acknowledgements are deliberately independent:
-
-- `--allow-unsafe` permits methods other than GET, HEAD, and OPTIONS.
-- `--allow-redacted` permits sending literal `[REDACTED]` placeholders.
-- `--allow-secrets` permits a reveal-mode capture.
-- `--allow-remote` permits a non-loopback target.
-
-Lens refuses to execute truncated requests and legacy text-only exports. It strips hop-by-hop headers, does not follow redirects, caps replay response bodies, and compares the replayed response status/body with the captured terminal response when a safe exact comparison is available.
-
-## TUI controls
+TUI controls:
 
 - `j`/`k` or arrow keys select a flow.
-- `PageUp`/`PageDown` scroll the inspector.
+- PageUp/PageDown scroll the inspector.
 - `p`, `s`, and `l` cycle protocol, state, and latency filters.
-- `/` searches and `x` clears filters.
+- `/` searches; `x` clears filters.
 - `q` or Ctrl-C stops Lens and restores the terminal.
 
-Non-interactive stdout automatically uses headless output.
+## Safe by default
 
-## Architecture and safety
+- Forwarding is independent from decoding, storage, export, and rendering; observation pressure must not block application traffic.
+- Authorization headers, cookies, common secret fields, SQL literal values, credentials, and database result values are masked or omitted before storage.
+- Bodies, retained flows, decoder buffers, plugin execution, and exports are bounded.
+- `--reveal` is local and explicit. Exporting while reveal mode is active additionally requires `--allow-secret-export`.
+- Export files use create-new behavior and never overwrite an existing file.
 
-The data plane copies application bytes independently from decoding, storage, replay preparation, and rendering. Observation travels through bounded channels; diagnostic detail can be dropped under pressure, but inspection must not block application traffic.
+Use Lens only with systems and traffic you are authorized to inspect. Read the [security model](SECURITY_REVIEW.md) before handling sensitive development data.
 
-Canonical records enter the store only after redaction. Bodies, retained flows, replay inputs, and replay responses are bounded. Malformed traffic and decoder failures are isolated to the affected flow.
+## Build from source
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md) for implemented boundaries and planned extension seams, [SECURITY.md](SECURITY.md) for reporting, and [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for the threat model.
+Install the stable Rust toolchain and platform build tools, then run:
+
+```sh
+git clone https://github.com/dpsyfk/lens.git
+cd lens
+cargo build --locked --release -p lens-cli
+cargo test --workspace --all-targets --all-features
+```
+
+The executable is `target/release/lens` (`target\release\lens.exe` on Windows). Windows source builds require the MSVC C++ build tools, including `link.exe`. Linux builds that enable optional eBPF discovery additionally require Clang with the BPF target.
+
+## Current boundaries
+
+- The normal portable path is an explicit proxy or fixed-target endpoint; it is not system-wide automatic capture.
+- Windows transparent TCP mode requires the separate first-party WFP driver, elevation, and production driver signing before general distribution.
+- Linux nftables and macOS PF transparent adapters are not delivered.
+- Transparent HTTPS remains encrypted; use the explicit `HTTPS_PROXY` path for inspection.
+- Publicly downloadable signed binaries, package-manager distribution, and the public installer are deferred until release signing is available.
 
 ## Documentation
 
-- [Quickstart](docs/src/quickstart.md)
+- [Install, update, and uninstall](docs/INSTALL.md)
+- [First capture and project setup](docs/src/quickstart.md)
+- [Safe exports and HTTP replay](docs/src/export-replay.md)
+- [WASM plugins](docs/src/plugins.md)
+- [Linux eBPF discovery](docs/src/linux-discovery.md)
 - [Troubleshooting](docs/src/troubleshooting.md)
-- [Installation and artifact verification](docs/INSTALL.md)
 - [Release and dogfood protocol](docs/RELEASING.md)
-- [Upgrade and rollback](docs/UPGRADING.md)
 - [Future work](docs/src/future-work.md)
 
-The historical [CLI design document](CLI.md) contains longer-term command ideas and is explicitly not a statement that every command is implemented.
+The historical [CLI design document](CLI.md) contains longer-term command ideas and is not a statement that every idea is implemented.
 
-## License
+## Contributing and license
 
-Apache-2.0. See [LICENSE](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a large change. Lens is licensed under [Apache-2.0](LICENSE).

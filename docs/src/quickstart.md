@@ -1,8 +1,8 @@
 # Quickstart
 
-Lens is an explicit developer proxy. Your application opts in by using an HTTP proxy setting or a fixed PostgreSQL, Redis, HTTP/2, or gRPC endpoint; Lens does not silently redirect system traffic in its default mode.
+Lens is an explicit developer proxy. Your application opts in through HTTP proxy settings or a fixed PostgreSQL, Redis, HTTP/2, or gRPC endpoint. Normal operation is local-only, rootless, and limited to the application you configure.
 
-## Check the installation
+## 1. Check the installation
 
 ```sh
 lens --version
@@ -10,32 +10,60 @@ lens quickstart
 lens doctor --check all
 ```
 
-Resolve unexplained doctor failures before capturing traffic. The default listener is local-only and does not require root or administrator access.
+Resolve unexpected doctor failures before capturing traffic. A missing transparent driver or unavailable Linux discovery backend does not block the normal explicit proxy path.
 
-## Inspect HTTP
+## 2. Inspect one HTTP request
 
-Start Lens in an interactive terminal:
+Start Lens in terminal 1:
 
 ```sh
 lens run --listen 127.0.0.1:8888
 ```
 
-In another shell, point a development application or command at it:
+In terminal 2 on PowerShell:
+
+```powershell
+$env:HTTP_PROXY = "http://127.0.0.1:8888"
+curl.exe http://example.com/
+```
+
+In terminal 2 on macOS or Linux:
 
 ```sh
 HTTP_PROXY=http://127.0.0.1:8888 curl http://example.com/
 ```
 
-PowerShell can set the variable for the current process with `$env:HTTP_PROXY = "http://127.0.0.1:8888"`.
+Select the new flow in the TUI to inspect its request, response, status, and latency.
 
-## Inspect HTTPS
+## 3. Run a development project through Lens
 
-Install the Lens development CA explicitly, then configure the HTTPS proxy:
+Set the proxy variables in the same terminal that starts the application. The variables are inherited by that process and do not permanently change the whole machine.
+
+PowerShell:
+
+```powershell
+$env:HTTP_PROXY = "http://127.0.0.1:8888"
+$env:HTTPS_PROXY = "http://127.0.0.1:8888"
+npm run dev                  # replace with the project's normal start command
+```
+
+macOS or Linux:
+
+```sh
+HTTP_PROXY=http://127.0.0.1:8888 \
+HTTPS_PROXY=http://127.0.0.1:8888 \
+npm run dev
+```
+
+Some HTTP libraries, browsers, and gRPC SDKs ignore proxy environment variables. Configure that client's documented proxy option and trust store when necessary. Lens can inspect only traffic the application actually sends through it.
+
+## 4. Inspect HTTPS
+
+Install the Lens development CA explicitly, confirm trust, and keep `HTTPS_PROXY` pointed at Lens:
 
 ```sh
 lens cert install
 lens doctor --check trust
-HTTPS_PROXY=http://127.0.0.1:8888 curl https://example.com/
 ```
 
 Remove trust when it is no longer needed:
@@ -44,13 +72,11 @@ Remove trust when it is no longer needed:
 lens cert uninstall
 ```
 
-Certificate-pinned applications must use `lens run --https passthrough`; their encrypted payload remains opaque.
+Certificate-pinned applications must use `lens run --https passthrough`; their encrypted payload remains opaque. When client and server negotiate `h2`, Lens preserves the selected protocol and inspects multiplexed HTTP/2 streams.
 
-When client and server negotiate `h2`, Lens preserves that ALPN selection and inspects multiplexed HTTP/2 streams. Clients that select `http/1.1` continue through the HTTP/1 decoder.
+## 5. Inspect PostgreSQL
 
-## Inspect PostgreSQL
-
-Run a dedicated Lens endpoint and point the application at it:
+Run a dedicated Lens endpoint and point the development application's connection string at it:
 
 ```sh
 lens run --protocol postgres --listen 127.0.0.1:15432 \
@@ -59,20 +85,18 @@ lens run --protocol postgres --listen 127.0.0.1:15432 \
 
 For an inspectable trusted local hop, use a connection such as `postgresql://app@127.0.0.1:15432/app?sslmode=disable`. Lens never downgrades PostgreSQL TLS. If the client negotiates TLS, Lens forwards it unchanged and marks the flow opaque.
 
-## Inspect Redis
-
-Run a dedicated RESP endpoint:
+## 6. Inspect Redis
 
 ```sh
 lens run --protocol redis --listen 127.0.0.1:16379 \
   --upstream 127.0.0.1:6379
 ```
 
-Point the development client at `redis://127.0.0.1:16379`. Lens decodes RESP2 and RESP3, including pipelining and push messages. Authentication material, ACL passwords, scripts, write values, and response values are masked by default. Fixed-target Redis TLS remains opaque.
+Point the development client at `redis://127.0.0.1:16379`. Authentication material, ACL passwords, scripts, write values, and response values are masked by default. Fixed-target Redis TLS remains opaque.
 
-## Inspect HTTP/2 and gRPC
+## 7. Inspect HTTP/2 or gRPC directly
 
-For a prior-knowledge cleartext endpoint:
+For a prior-knowledge cleartext local endpoint:
 
 ```sh
 lens run --protocol http2 --listen 127.0.0.1:18080 \
@@ -81,21 +105,27 @@ lens run --protocol grpc --listen 127.0.0.1:15051 \
   --upstream 127.0.0.1:50051
 ```
 
-The second command is an h2c endpoint; point the development gRPC client at `127.0.0.1:15051` with transport security disabled on that trusted local hop. For TLS gRPC clients that support `HTTPS_PROXY`, use the normal explicit proxy and install the Lens CA. Lens reports method paths, message sizes, compression flags, terminal status, and per-stream latency. Protobuf payloads are redacted by default and are not schema-decoded.
+Point the gRPC client at `127.0.0.1:15051` with transport security disabled only on that trusted local hop. Lens reports method paths, message sizes, compression flags, terminal status, and per-stream latency. Protobuf payloads are redacted by default and are not schema-decoded.
 
-## Use the TUI
+## 8. Use the TUI or a safe export
 
 - `j`/`k` or arrow keys select a flow.
-- `PageUp`/`PageDown` scroll the inspector.
+- PageUp/PageDown scroll the inspector.
 - `p`, `s`, and `l` cycle protocol, state, and latency filters.
 - `/` searches; `x` clears filters.
 - `q` or Ctrl-C stops Lens and restores the terminal.
 
-Use `--headless` for a non-interactive session and `--export PATH` for a redacted JSONL diagnostic. Exports never overwrite an existing file.
+Use headless mode for automation and create a redacted diagnostic when Lens stops:
 
-## Add a capability-limited plugin
+```sh
+lens run --headless --export lens-flows.jsonl
+```
 
-Install is explicit and loading remains off until requested:
+Exports never overwrite an existing file. Do not use `--reveal` for a shareable diagnostic.
+
+## Optional features
+
+Install and explicitly enable a capability-limited WASM plugin:
 
 ```sh
 lens plugin install --file ./plugin.wasm --name example --plugin-version 1.0.0
@@ -103,26 +133,18 @@ lens plugin list
 lens run --enable-plugins
 ```
 
-Plugins receive an always-redacted JSON message and can return a bounded annotation for the inspector/export. They have no imports or ambient filesystem/network capability. See [WASM plugins](plugins.md) for ABI v1.
-
-## Optional Linux connection discovery
-
-Linux release binaries can add short-lived process identity using a metadata-only cgroup eBPF probe:
+Add metadata-only process discovery to a supported Linux build:
 
 ```sh
 lens doctor --check discovery
 sudo lens run --ebpf-cgroup /sys/fs/cgroup
 ```
 
-Choose a narrower development cgroup when possible. This is privileged and opt-in; normal explicit proxy operation remains rootless. See [Linux eBPF discovery](linux-discovery.md).
-
-## Replay one HTTP request
-
-Replay defaults to a preview and requires an explicit target:
+Preview one captured HTTP/1 request before any replay execution:
 
 ```sh
 lens replay --input lens-flows.jsonl --flow 1 \
   --target http://127.0.0.1:8080
 ```
 
-Review the output before adding `--execute`. Redacted placeholders, reveal-mode secrets, state-changing methods, and remote targets each require their own acknowledgement. Truncated or legacy text-only requests cannot execute. See [safe replay](export-replay.md) for the complete guard model.
+See [safe replay](export-replay.md), [WASM plugins](plugins.md), [Linux discovery](linux-discovery.md), and [troubleshooting](troubleshooting.md) for the complete safety and configuration details.
