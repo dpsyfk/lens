@@ -1,5 +1,7 @@
 # Upgrading Lens v0.1
 
+On Windows, rerun the one-line installer from the [installation guide](INSTALL.md). It verifies the replacement before installing it and retains the replaced executable as `lens.exe.previous` for rollback.
+
 ## Safe upgrade
 
 1. Read the target release notes and `CHANGELOG.md`.

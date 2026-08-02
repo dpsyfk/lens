@@ -46,6 +46,14 @@ jobs:
           cmp target/package-a/*.tar.gz target/package-b/*.tar.gz
           python scripts/verify-release.py target/package-a/*.tar.gz
 
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test one-line installer behavior
+        shell: pwsh
+        run: ./scripts/test-install.ps1
+
   format:
     runs-on: ubuntu-latest
     steps:

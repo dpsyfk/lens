@@ -8,6 +8,8 @@ on:
       - "crates/**"
       - "docs/INSTALL.md"
       - "docs/UPGRADING.md"
+      - "install.ps1"
+      - "scripts/test-install.ps1"
       - "scripts/package-release.py"
       - "scripts/release-smoke.py"
       - "scripts/verify-release.py"

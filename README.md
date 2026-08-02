@@ -4,6 +4,27 @@ Lens is a local-first developer proxy for inspecting HTTP/1.1, HTTP/2, gRPC, Pos
 
 Lens is currently a development preview. Cross-platform release automation exists, but no signed public v0.1 release has been published yet.
 
+## Install on Windows
+
+After the first signed release is published, open PowerShell and run one command:
+
+```powershell
+irm https://raw.githubusercontent.com/dpsyfk/lens/main/install.ps1 | iex
+```
+
+The installer downloads the latest Windows x64 release, verifies its SHA-256 checksum and Authenticode signature, installs it under the current user's local programs directory, and adds `lens` to both the current shell and future shells. It does not require administrator access. Run the same command again to update Lens.
+
+Then use Lens from any directory:
+
+```powershell
+lens --version
+lens doctor --check all
+lens quickstart
+lens run --listen 127.0.0.1:8888
+```
+
+The command intentionally refuses draft, unsigned, malformed, or checksum-mismatched releases. Until a signed public release exists, use the source-build instructions below; generated CI artifacts remain development previews.
+
 ## What works today
 
 | Capability | Current support |
@@ -23,7 +44,7 @@ Lens is currently a development preview. Cross-platform release automation exist
 
 The process/service identity map is implemented. On Windows, Lens has a first-party WFP driver plus crash-safe dynamic filter activation and original-destination TCP forwarding. Installing the signed driver still requires an explicit elevated step; Linux nftables and macOS PF adapters remain roadmap work. Linux eBPF is an optional metadata-only identity aid, not transparent capture. Plugins are explicit, capability-free WASM processors over separately redacted events.
 
-## Build and check
+## Build from source
 
 Install the stable Rust toolchain, clone the repository, then run:
 
