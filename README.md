@@ -6,6 +6,13 @@ Lens is currently a development preview. Cross-platform release automation exist
 
 ## Install on Windows
 
+There are two Windows install paths:
+
+- **Normal user path:** use the one-line installer after the first signed release is published.
+- **Development preview path:** until that release exists, install the latest successful CI artifact manually. CI artifacts are unsigned previews, require GitHub access, and can expire.
+
+### Normal signed install
+
 After the first signed release is published, open PowerShell and run one command:
 
 ```powershell
@@ -23,7 +30,66 @@ lens quickstart
 lens run --listen 127.0.0.1:8888
 ```
 
-The command intentionally refuses draft, unsigned, malformed, or checksum-mismatched releases. Until a signed public release exists, use the source-build instructions below; generated CI artifacts remain development previews.
+The command intentionally refuses draft, unsigned, malformed, or checksum-mismatched releases. If it says no published Lens release was found, the installer is working correctly; the signed release has not been published yet.
+
+### Development preview install
+
+Use this path only before the first signed release exists, or when testing an unreleased build. It installs the latest successful Windows artifact from the release workflow into the same user-owned location the official installer uses.
+
+Prerequisites:
+
+- GitHub CLI authenticated with access to this repository: `gh auth status`
+- PowerShell
+
+From any PowerShell window:
+
+```powershell
+$InstallRoot = "$env:LOCALAPPDATA\Programs\Lens"
+$Bin = Join-Path $InstallRoot "bin"
+$ArtifactDir = Join-Path $InstallRoot "_artifact"
+New-Item -ItemType Directory -Force -Path $Bin, $ArtifactDir | Out-Null
+
+$RunId = gh run list `
+  --repo dpsyfk/lens `
+  --workflow release.yml `
+  --status success `
+  --limit 1 `
+  --json databaseId `
+  --jq '.[0].databaseId'
+
+gh run download $RunId `
+  --repo dpsyfk/lens `
+  --name lens-x86_64-pc-windows-msvc `
+  --dir $ArtifactDir
+
+$LensExe = Get-ChildItem $ArtifactDir -Recurse -Filter lens.exe | Select-Object -First 1
+Copy-Item $LensExe.FullName (Join-Path $Bin "lens.exe") -Force
+
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($UserPath -split ";") -notcontains $Bin) {
+  [Environment]::SetEnvironmentVariable("Path", "$UserPath;$Bin", "User")
+}
+$env:Path = "$env:Path;$Bin"
+
+lens --version
+lens doctor --check all
+```
+
+Then start a session:
+
+```powershell
+lens quickstart
+lens run --listen 127.0.0.1:8888
+```
+
+In another PowerShell window:
+
+```powershell
+$env:HTTP_PROXY = "http://127.0.0.1:8888"
+curl http://example.com/
+```
+
+After the signed release is published, switch to the normal installer command above. It will replace the preview binary only after checksum, signature, and command validation pass.
 
 ## What works today
 
