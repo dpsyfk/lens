@@ -93,6 +93,10 @@ gh run download $RunId `
 
 if ($LASTEXITCODE -ne 0) { throw "Lens artifact download failed." }
 
+$Bundle = Get-ChildItem -LiteralPath $ArtifactDir -Filter "*.zip" | Select-Object -First 1
+if (-not $Bundle) { throw "Lens ZIP bundle was not found in the downloaded artifact." }
+Expand-Archive -LiteralPath $Bundle.FullName -DestinationPath $ArtifactDir -Force
+
 $LensExe = Get-ChildItem $ArtifactDir -Recurse -Filter lens.exe | Select-Object -First 1
 if (-not $LensExe) { throw "lens.exe was not found in the downloaded artifact." }
 
