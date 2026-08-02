@@ -11,7 +11,7 @@ There are two Windows install paths:
 - **Normal user path:** use the one-line installer after the first signed release is published.
 - **Development preview path:** until that release exists, install the latest successful CI artifact manually. CI artifacts are unsigned previews, require GitHub access, and can expire.
 
-### Normal signed install
+### Normal signed install (one-liner cant be used now skip it and move to the next down there)
 
 After the first signed release is published, open PowerShell and run one command:
 
