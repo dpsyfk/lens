@@ -57,7 +57,7 @@ def run_metadata_checks(binary: Path) -> None:
         ([str(binary), "--version"], "lens "),
         ([str(binary), "quickstart"], "lens doctor"),
         ([str(binary), "doctor", "--check", "config"], "lens doctor"),
-        ([str(binary), "doctor", "--check", "all"], "redaction: enabled"),
+        ([str(binary), "doctor", "--check", "all"], "redaction=enabled"),
         (
             [
                 str(binary),
