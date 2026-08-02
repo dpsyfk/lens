@@ -1,8 +1,30 @@
 # Installing Lens v0.1
 
-Lens v0.1 will be distributed as signed release archives for Windows, macOS, and Linux after the release gate passes. No signed public v0.1 release exists yet; until then, build from source and treat generated CI artifacts as development previews. Package-manager installation is intentionally deferred until after v1.
+Lens v0.1 will be distributed as signed release archives for Windows, macOS, and Linux after the release gate passes. No signed public v0.1 release exists yet; until then, build from source and treat generated CI artifacts as development previews. Package-manager manifests remain deferred until after v1, but Windows has a first-party user-scoped installer.
 
-## 1. Choose an artifact
+## Windows one-line install
+
+After the first signed release is published, open PowerShell and run:
+
+```powershell
+irm https://raw.githubusercontent.com/dpsyfk/lens/main/install.ps1 | iex
+```
+
+The script selects the latest published Windows x64 release, verifies the archive against `SHA256SUMS`, requires a valid Authenticode signature on `lens.exe`, installs to `%LOCALAPPDATA%\Programs\Lens\bin`, and adds that directory to the current process and user `PATH`. No administrator access or manual directory creation is required. Rerun the same command to update; the replaced executable is retained as `lens.exe.previous` for rollback.
+
+To inspect the installer before running it:
+
+```powershell
+irm https://raw.githubusercontent.com/dpsyfk/lens/main/install.ps1 -OutFile install.ps1
+Get-Content .\install.ps1
+.\install.ps1
+```
+
+The installer stops without changing the existing installation if the release is missing, draft, malformed, unsigned, or fails checksum or command validation.
+
+## Manual installation
+
+### 1. Choose an artifact
 
 Download the archive for your platform from the matching GitHub release:
 
@@ -23,7 +45,7 @@ gh attestation verify lens-0.1.0-TARGET.ARCHIVE -R dpsyfk/lens
 
 The Linux release binary includes the optional eBPF discovery backend and embedded metadata-only probe. It remains inactive unless `--ebpf-cgroup` is supplied and still requires kernel support plus permission to attach cgroup BPF programs. Other platforms retain the portable process resolver.
 
-## 2. Verify before extracting
+### 2. Verify before extracting
 
 Install [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) and verify the checksum manifest:
 
@@ -39,7 +61,7 @@ On macOS or Linux, verify the downloaded archive with `sha256sum -c SHA256SUMS`.
 
 Tagged Windows binaries are Authenticode-signed. Tagged macOS binaries are Developer ID-signed and their ZIP archives are submitted to Apple's notarization service. The release workflow refuses to create a tagged release when either native signing credential set is absent.
 
-## 3. Install the binary
+### 3. Install the binary
 
 Extract the archive and move `lens` or `lens.exe` into a user-owned directory on `PATH`. Lens does not require administrator or root access for its default proxy path.
 
@@ -51,7 +73,7 @@ lens doctor --check all
 lens quickstart
 ```
 
-## 4. Enable HTTPS inspection explicitly
+## Enable HTTPS inspection explicitly
 
 Lens never changes trust without an explicit command:
 
@@ -62,7 +84,7 @@ lens doctor --check trust
 
 Remove that trust at any time with `lens cert uninstall`. Applications using certificate pinning may reject interception; use passthrough mode for those flows.
 
-## 5. Start a daily session
+## Start a daily session
 
 ```sh
 lens run --listen 127.0.0.1:8888
