@@ -23,5 +23,7 @@ If a release rotates or changes the local CA format, its release notes must call
 - Export schema 1.1 adds `wire_base64` for binary-safe replay. Older text-only exports remain readable for previews but are intentionally not executable.
 - Export schema 1.3 adds `plugin_annotations` and `plugin_failures`; readers must ignore unknown additive fields.
 - Plugin ABI compatibility is independent from the Lens package version. ABI-v1 modules declare no imports and may need reinstalling if a future release introduces a new ABI.
+
+Release candidates must replay-preview the committed v0.1 JSONL fixture, complete `lens doctor --check all`, shut down gracefully, and write a final redacted export on every release operating system. The four-platform dogfood gate separately verifies that configuration and user-scoped CA trust survive an upgrade and that the previously verified binary remains usable for rollback.
 - Breaking changes require a major version change after v1; before v1 they require an explicit migration note.
 - Downgrades never restore revealed secrets because revealed values are not persisted by default.

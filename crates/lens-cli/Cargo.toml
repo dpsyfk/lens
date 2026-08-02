@@ -23,7 +23,7 @@ lens-replay = { path = "../lens-replay" }
 lens-store = { path = "../lens-store" }
 lens-tls = { path = "../lens-tls" }
 lens-tui = { path = "../lens-tui" }
-tokio = { version = "1.48", features = ["rt-multi-thread", "signal"] }
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal"] }
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 [dev-dependencies]

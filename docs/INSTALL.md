@@ -15,6 +15,12 @@ Download the archive for your platform from the matching GitHub release:
 
 Every release also contains `SHA256SUMS` and one `.sigstore.json` bundle for each archive and for the checksum file.
 
+Verify GitHub build provenance for the selected archive as an independent origin check:
+
+```sh
+gh attestation verify lens-0.1.0-TARGET.ARCHIVE -R dpsyfk/lens
+```
+
 The Linux release binary includes the optional eBPF discovery backend and embedded metadata-only probe. It remains inactive unless `--ebpf-cgroup` is supplied and still requires kernel support plus permission to attach cgroup BPF programs. Other platforms retain the portable process resolver.
 
 ## 2. Verify before extracting
@@ -62,6 +68,6 @@ Remove that trust at any time with `lens cert uninstall`. Applications using cer
 lens run --listen 127.0.0.1:8888
 ```
 
-Point the application at `HTTP_PROXY=http://127.0.0.1:8888` and `HTTPS_PROXY=http://127.0.0.1:8888`. The release archive includes `QUICKSTART.md`, `REPLAY.md`, `PLUGINS.md`, `LINUX_DISCOVERY.md`, and `TROUBLESHOOTING.md`; the same material is available in the online [quickstart](src/quickstart.md), [safe replay guide](src/export-replay.md), [plugin guide](src/plugins.md), [Linux discovery guide](src/linux-discovery.md), and [troubleshooting guide](src/troubleshooting.md).
+Point the application at `HTTP_PROXY=http://127.0.0.1:8888` and `HTTPS_PROXY=http://127.0.0.1:8888`. The release archive includes `QUICKSTART.md`, `REPLAY.md`, `PLUGINS.md`, `LINUX_DISCOVERY.md`, `TROUBLESHOOTING.md`, `DOGFOODING.md`, and the machine-readable dogfood report template; the same material is available in the online [quickstart](src/quickstart.md), [safe replay guide](src/export-replay.md), [plugin guide](src/plugins.md), [Linux discovery guide](src/linux-discovery.md), and [troubleshooting guide](src/troubleshooting.md).
 
 Release candidates are verified with the maintainer [dogfood protocol](DOGFOODING.md) before publication.

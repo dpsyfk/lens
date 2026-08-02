@@ -307,6 +307,27 @@ The review assumes the product intentionally handles decrypted traffic in a loca
 #### Residual risk
 - once a user explicitly exports or reveals data, the tool cannot control what they do with it afterward.
 
+### 10. Release supply chain
+
+#### Surface
+- locked Rust dependencies and build actions
+- native signing and notarization credentials
+- release archives, checksum manifests, and dogfood evidence
+
+#### Risks
+- dependency source substitution or missing registry integrity data
+- unsigned, mis-signed, or provenance-free artifacts
+- publishing before every supported release target is independently exercised
+
+#### Mitigations
+- reject non-crates.io registry/git dependencies and missing lockfile checksums at the source release gate
+- fail tagged builds when Windows or Apple native credentials are absent
+- sign checksum and archive blobs with Sigstore and attach GitHub build provenance
+- require exact checksums, signature bundles, four distinct testers, platform-specific gates, and zero blockers before publication
+
+#### Residual risk
+- signing identities and tester machines are external trust boundaries; repository automation can validate their evidence but cannot replace certificate custody or independent clean-machine testing.
+
 ## Specific Review of Requested Threats
 
 ### MITM

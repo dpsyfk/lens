@@ -468,8 +468,8 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
                 let store_task = tokio::spawn(store_actor.run(observations));
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
                 let signal_task = tokio::spawn(async move {
-                    if let Err(error) = tokio::signal::ctrl_c().await {
-                        eprintln!("lens: failed to wait for Ctrl-C: {error}");
+                    if let Err(error) = wait_for_shutdown_signal().await {
+                        eprintln!("lens: failed to wait for a shutdown signal: {error}");
                     }
                     let _ = shutdown_tx.send(());
                 });
@@ -514,6 +514,21 @@ fn run_proxy_session(config: &ResolvedConfig, bind_listener: bool) -> Result<Str
         }
     }
     Ok(output)
+}
+
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut ctrl_break = tokio::signal::windows::ctrl_break()?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = ctrl_break.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
 
 fn transparent_nonce() -> u64 {

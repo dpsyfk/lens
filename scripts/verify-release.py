@@ -32,6 +32,8 @@ required = {
     "TROUBLESHOOTING.md",
     "PLUGINS.md",
     "LINUX_DISCOVERY.md",
+    "DOGFOODING.md",
+    "DOGFOOD-REPORT.example.json",
 }
 if not basenames.intersection(binary_names):
     raise SystemExit("release archive does not contain the Lens binary")

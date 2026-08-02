@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "release": "v0.1.0",
+  "target": "x86_64-unknown-linux-gnu",
+  "artifact": "lens-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+  "tester": "replace-with-independent-tester",
+  "environment": "replace-with-OS-version-architecture-terminal-and-shell",
+  "checks": {
+    "artifact_verification": false,
+    "first_run": false,
+    "tui_restoration": false,
+    "http": false,
+    "https": false,
+    "postgres": false,
+    "redis": false,
+    "http2_grpc": false,
+    "plugins": false,
+    "native_signature": false,
+    "ebpf": false,
+    "default_redaction": false,
+    "fault_overload": false,
+    "upgrade_rollback": false
+  },
+  "blocking_issues": []
+}
