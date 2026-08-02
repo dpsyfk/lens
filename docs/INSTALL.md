@@ -1,32 +1,10 @@
 # Installing Lens v0.1
 
-Lens v0.1 will be distributed as signed release archives for Windows, macOS, and Linux after the release gate passes. No signed public v0.1 release exists yet; until then, build from source or install a generated CI artifact as a development preview. Package-manager manifests remain deferred until after v1, but Windows has a first-party user-scoped installer.
-
-## Windows one-line install
-
-After the first signed release is published, open PowerShell and run:
-
-```powershell
-irm https://raw.githubusercontent.com/dpsyfk/lens/main/install.ps1 | iex
-```
-
-The script selects the latest published Windows x64 release, verifies the archive against `SHA256SUMS`, requires a valid Authenticode signature on `lens.exe`, installs to `%LOCALAPPDATA%\Programs\Lens\bin`, and adds that directory to the current process and user `PATH`. No administrator access or manual directory creation is required. Rerun the same command to update; the replaced executable is retained as `lens.exe.previous` for rollback.
-
-To inspect the installer before running it:
-
-```powershell
-irm https://raw.githubusercontent.com/dpsyfk/lens/main/install.ps1 -OutFile install.ps1
-Get-Content .\install.ps1
-.\install.ps1
-```
-
-The installer stops without changing the existing installation if the release is missing, draft, malformed, unsigned, or fails checksum or command validation.
-
-If the installer reports that no published Lens release was found, the repository has not published the first signed release yet. Use the development preview path below until that release exists.
+Lens v0.1 will eventually be distributed as signed release archives for Windows, macOS, and Linux. No signed public v0.1 release exists yet because native Windows and macOS signing require external paid credentials. Until those credentials are funded and configured, build from source or install a generated GitHub Actions artifact as a development preview.
 
 ## Windows development preview install
 
-Use this path only before the first signed release exists, or when testing an unreleased build. Release workflow artifacts are unsigned previews unless they came from a tagged signed release, require GitHub access, and can expire.
+Use this path before the first signed release exists, or when testing an unreleased build. Release workflow artifacts are unsigned previews, require GitHub access, and can expire.
 
 Prerequisites:
 
@@ -78,10 +56,10 @@ In another PowerShell window:
 
 ```powershell
 $env:HTTP_PROXY = "http://127.0.0.1:8888"
-curl http://example.com/
+curl.exe http://example.com/
 ```
 
-After the signed release is published, switch to the one-line installer. It replaces the preview binary only after checksum, signature, and command validation pass.
+The future public installer remains deferred until release signing credentials are available.
 
 ## Manual installation
 
