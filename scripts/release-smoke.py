@@ -20,6 +20,8 @@ import time
 
 TIMEOUT_SECONDS = 20
 SECRET = "lens-dogfood-secret"
+ROOT = Path(__file__).resolve().parent.parent
+UPGRADE_FIXTURE = ROOT / "tests" / "fixtures" / "v0.1-http1.jsonl"
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -55,6 +57,20 @@ def run_metadata_checks(binary: Path) -> None:
         ([str(binary), "--version"], "lens "),
         ([str(binary), "quickstart"], "lens doctor"),
         ([str(binary), "doctor", "--check", "config"], "lens doctor"),
+        ([str(binary), "doctor", "--check", "all"], "redaction: enabled"),
+        (
+            [
+                str(binary),
+                "replay",
+                "--input",
+                str(UPGRADE_FIXTURE),
+                "--flow",
+                "7",
+                "--target",
+                "http://127.0.0.1:9",
+            ],
+            "network: not sent",
+        ),
     )
     for command, expected in commands:
         result = subprocess.run(
@@ -104,25 +120,21 @@ def proxy_request(proxy_port: int, upstream_port: int) -> bytes:
 
 
 def stop_process(process: subprocess.Popen[str]) -> tuple[str, str, bool]:
-    graceful = os.name != "nt"
-    if graceful:
-        os.killpg(process.pid, signal.SIGINT)
+    if os.name == "nt":
+        process.send_signal(signal.CTRL_BREAK_EVENT)
     else:
-        # Windows CI cannot safely direct CTRL_C_EVENT to a detached child from
-        # every runner shell. Forwarding is still tested there; Unix runners
-        # additionally verify graceful shutdown and the final redacted export.
-        process.terminate()
+        os.killpg(process.pid, signal.SIGINT)
     try:
         stdout, stderr = process.communicate(timeout=TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         process.kill()
         stdout, stderr = process.communicate()
         raise RuntimeError("Lens did not stop within the smoke-test deadline")
-    if graceful and process.returncode != 0:
+    if process.returncode != 0:
         raise RuntimeError(
             f"Lens graceful shutdown failed ({process.returncode})\n{stdout}\n{stderr}"
         )
-    return stdout, stderr, graceful
+    return stdout, stderr, True
 
 
 def verify_export(path: Path) -> None:
@@ -176,15 +188,14 @@ def main() -> None:
             if b"200 OK" not in response or b"lens-dogfood-ok" not in response:
                 raise RuntimeError(f"unexpected proxied response: {response[:512]!r}")
         finally:
-            stdout, stderr, graceful = stop_process(process)
+            stdout, stderr, _ = stop_process(process)
             fixture.shutdown()
             fixture.server_close()
             fixture_thread.join(timeout=5)
 
-        if graceful:
-            if "accepted:" not in stdout or "completed:" not in stdout:
-                raise RuntimeError(f"Lens did not print final session counters\n{stdout}\n{stderr}")
-            verify_export(export)
+        if "accepted:" not in stdout or "completed:" not in stdout:
+            raise RuntimeError(f"Lens did not print final session counters\n{stdout}\n{stderr}")
+        verify_export(export)
 
     print(f"release smoke passed on {sys.platform}")
 

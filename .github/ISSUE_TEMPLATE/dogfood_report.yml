@@ -4,7 +4,7 @@ title: "[Dogfood]: "
 body:
   - type: markdown
     attributes:
-      value: Complete this report using a binary downloaded from the draft release. Do not attach secret or reveal-mode exports.
+      value: Complete this report using a binary downloaded from the draft release. Copy `DOGFOOD-REPORT.example.json`, fill the same evidence, and attach it for the automated release gate. Do not attach secret or reveal-mode exports.
   - type: input
     id: release
     attributes:
@@ -19,23 +19,44 @@ body:
       description: OS version, CPU architecture, terminal, and shell.
     validations:
       required: true
+  - type: input
+    id: tester
+    attributes:
+      label: Independent tester
+      description: One person may submit only one release-target report.
+    validations:
+      required: true
   - type: checkboxes
     id: gates
     attributes:
       label: Release gates
       options:
-        - label: Artifact signature and checksum verification passed.
+        - label: "[artifact_verification] Artifact checksum, Sigstore bundle, and GitHub provenance verification passed."
           required: true
-        - label: First-run commands and TUI terminal restoration passed.
+        - label: "[first_run] First-run commands completed without unexplained failures."
           required: true
-        - label: HTTP forwarding, inspection, and redaction passed.
+        - label: "[tui_restoration] TUI quit and Ctrl-C restored the terminal."
           required: true
-        - label: HTTPS trust, interception, redaction, and trust removal passed.
+        - label: "[http] HTTP forwarding, inspection, latency, and redaction passed."
           required: true
-        - label: PostgreSQL forwarding, inspection, and redaction passed.
+        - label: "[https] HTTPS trust, interception, pinned-client passthrough, and trust removal passed."
           required: true
-        - label: Fault and overload checks did not block application traffic or terminate Lens.
+        - label: "[postgres] PostgreSQL forwarding, inspection, timing, and redaction passed."
           required: true
+        - label: "[redis] Redis forwarding, pipelining, timing, and structural redaction passed."
+          required: true
+        - label: "[http2_grpc] HTTP/2 multiplexing and gRPC metadata inspection passed."
+          required: true
+        - label: "[plugins] Plugin opt-in, sandbox containment, integrity, limits, and always-redacted input passed."
+          required: true
+        - label: "[default_redaction] TUI and export retained no test secrets."
+          required: true
+        - label: "[fault_overload] Malformed and saturated observation remained flow-local and did not block forwarding."
+          required: true
+        - label: "[upgrade_rollback] Upgrade preserved config/trust compatibility and rollback restored the prior binary."
+          required: true
+        - label: "[native_signature] Windows Authenticode or macOS Developer ID signature and notarization passed (required on Windows/macOS)."
+        - label: "[ebpf] Scoped Linux eBPF identity, Lens exclusion, metadata-only behavior, and detach-on-exit passed (required on Linux)."
   - type: textarea
     id: evidence
     attributes:

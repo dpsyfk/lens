@@ -19,7 +19,7 @@ Lens is currently a development preview. Cross-platform release automation exist
 | Replay | HTTP/1 request preview and guarded execution against an explicit target |
 | Plugins | Explicitly installed ABI-v1 WASM annotations with no imports and bounded fuel/memory/I/O |
 | Linux discovery | Optional cgroup eBPF outbound TCP identity metadata; no payload capture or routing |
-| Platforms | Windows, macOS Intel/Apple silicon, and Linux builds exercised in CI |
+| Platforms | Windows, macOS Intel/Apple silicon, and Linux builds, packaged-binary smoke tests, and release gates exercised in CI |
 
 The process/service identity map is implemented. On Windows, Lens has a first-party WFP driver plus crash-safe dynamic filter activation and original-destination TCP forwarding. Installing the signed driver still requires an explicit elevated step; Linux nftables and macOS PF adapters remain roadmap work. Linux eBPF is an optional metadata-only identity aid, not transparent capture. Plugins are explicit, capability-free WASM processors over separately redacted events.
 

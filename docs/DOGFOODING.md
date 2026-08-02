@@ -1,6 +1,6 @@
 # Lens v1 dogfood protocol
 
-Use this protocol on binaries downloaded from the draft GitHub release, not binaries built from a local checkout. A v1 release is ready to publish only after Windows x64, macOS Intel, macOS Apple silicon, and Linux x64 have passing reports.
+Use this protocol on binaries downloaded from the draft GitHub release, not binaries built from a local checkout. A v1 release is ready to publish only after Windows x64, macOS Intel, macOS Apple silicon, and Linux x64 have passing reports from four independent testers.
 
 ## Safety
 
@@ -13,7 +13,7 @@ Use this protocol on binaries downloaded from the draft GitHub release, not bina
 
 Record the release tag, artifact name, operating-system version, terminal, shell, and application used. Then verify:
 
-- [ ] The archive and `SHA256SUMS` pass the documented Sigstore and checksum verification.
+- [ ] The archive and `SHA256SUMS` pass the documented checksum, Sigstore, and GitHub provenance verification.
 - [ ] Windows reports a valid Authenticode signature, or macOS reports a valid Developer ID signature and notarization. Linux has no native platform-signing requirement.
 - [ ] `lens --version`, `lens quickstart`, and `lens doctor --check all` complete without an unexplained failure.
 - [ ] `lens run --listen 127.0.0.1:8888` opens the TUI and restores the terminal after `q` and Ctrl-C.
@@ -33,6 +33,8 @@ Record the release tag, artifact name, operating-system version, terminal, shell
 - [ ] `lens cert uninstall` removes trust, and the operating system no longer trusts a Lens-issued leaf certificate.
 
 ## Report
+
+Copy `DOGFOOD-REPORT.example.json` from the release archive, replace its placeholders, and set a check to `true` only after the corresponding test passes. Windows and macOS reports require `native_signature`; the Linux report requires `ebpf`. Keep `blocking_issues` empty only when every release-blocking finding is resolved. Attach the completed JSON to the matching GitHub dogfood issue; do not include secrets or reveal-mode output.
 
 ```text
 Release/tag:
@@ -65,5 +67,13 @@ Date:
 ```
 
 ## Release gate
+
+The maintainer downloads the four attached JSON reports and the draft release assets into separate directories, then runs:
+
+```sh
+python scripts/release_gate.py --reports ./dogfood-reports --artifacts ./release-assets
+```
+
+The command requires exactly one target per independent tester, the platform-specific native-signing/eBPF check, every common product check, no blocking issues, the exact archive set, exact SHA-256 matches, and a Sigstore bundle for every archive and checksum manifest. Cryptographic verification with Cosign and `gh attestation verify` remains mandatory; the script validates completeness and consistency of that evidence rather than replacing cryptography.
 
 The maintainer links all four passing reports from the draft release checklist. Any failure involving traffic correctness, secret retention, certificate cleanup, terminal corruption, unbounded resource use, native signing, notarization, or artifact verification blocks publication. Other defects require an explicit documented disposition before publication.

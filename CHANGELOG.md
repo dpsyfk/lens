@@ -6,6 +6,8 @@ This project follows Keep a Changelog conventions.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-02
+
 ### Added
 
 - Explicitly installed, import-free ABI-v1 WASM plugins with integrity verification, always-redacted inputs, bounded annotations, fresh instances, and fuel/memory/I/O limits.
@@ -23,3 +25,5 @@ This project follows Keep a Changelog conventions.
 ### Changed
 
 - Transient listener accept failures now back off and retry instead of terminating the proxy session.
+- Release candidates now require an exact four-platform dogfood quorum, complete artifact checksums and Sigstore bundles, and GitHub build-provenance attestations.
+- Packaged-binary smoke tests now require graceful shutdown, final redacted exports, full diagnostics, and v0.1 replay compatibility on every release operating system.
