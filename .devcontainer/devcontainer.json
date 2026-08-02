@@ -1,0 +1,52 @@
+{
+  "name": "Lens remote development",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "GitHub.vscode-github-actions",
+        "rust-lang.rust-analyzer",
+        "serayuzgur.crates",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "rust-analyzer.cargo.features": "all",
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  },
+  "forwardPorts": [
+    8888,
+    15432,
+    16379,
+    18080,
+    15051
+  ],
+  "portsAttributes": {
+    "8888": {
+      "label": "Lens HTTP/HTTPS proxy",
+      "onAutoForward": "silent"
+    },
+    "15432": {
+      "label": "Lens PostgreSQL endpoint",
+      "onAutoForward": "silent"
+    },
+    "16379": {
+      "label": "Lens Redis endpoint",
+      "onAutoForward": "silent"
+    },
+    "18080": {
+      "label": "Lens HTTP/2 endpoint",
+      "onAutoForward": "silent"
+    },
+    "15051": {
+      "label": "Lens gRPC endpoint",
+      "onAutoForward": "silent"
+    }
+  },
+  "postCreateCommand": "rustup component add rustfmt clippy && cargo metadata --locked --no-deps --format-version 1 >/dev/null"
+}

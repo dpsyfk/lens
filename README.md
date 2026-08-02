@@ -36,6 +36,8 @@ The executable is `target/release/lens` (`target\release\lens.exe` on Windows).
 
 Linux source builds that need eBPF discovery use `cargo build --locked --release -p lens-cli --features ebpf` and require Clang with the BPF target. Normal explicit-proxy builds stay rootless and do not require it.
 
+For remote Linux development without using local CPU, open the repository in GitHub Codespaces. See [docs/CODESPACES.md](docs/CODESPACES.md) for the devcontainer setup, forwarded Lens ports, and recommended remote checks.
+
 ## Plugins and Linux discovery
 
 ```sh
@@ -158,6 +160,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for implemented boundaries and planned e
 - [Quickstart](docs/src/quickstart.md)
 - [Troubleshooting](docs/src/troubleshooting.md)
 - [Installation and artifact verification](docs/INSTALL.md)
+- [GitHub Codespaces](docs/CODESPACES.md)
 - [Release and dogfood protocol](docs/RELEASING.md)
 - [Upgrade and rollback](docs/UPGRADING.md)
 - [Future work](docs/src/future-work.md)
