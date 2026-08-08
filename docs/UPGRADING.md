@@ -1,6 +1,6 @@
 # Upgrading Lens v0.1
 
-No signed public release or public installer exists yet. For a development-preview installation, stop Lens and repeat the artifact download steps in the [installation guide](INSTALL.md); the Windows instructions replace the user-owned `lens.exe` and retain the prior binary as `lens.exe.previous`.
+No signed stable release exists yet. For a public development-preview installation, stop Lens and rerun the platform installer from the [installation guide](INSTALL.md). Windows retains the replaced user-owned binary as `lens.exe.previous`; Unix replaces only `$HOME/.local/bin/lens`.
 
 ## Safe upgrade
 

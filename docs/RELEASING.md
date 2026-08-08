@@ -18,6 +18,19 @@ Apple signing and notarization:
 
 Linux and archive signatures use GitHub OIDC with Sigstore keyless signing, so no long-lived Cosign private key is stored.
 
+## Publish an unsigned development preview
+
+Preview publication does not use or weaken the signed stable-release path. Confirm `main` is green, choose the next numeric preview for the current workspace version, create an annotated tag, and push it:
+
+```sh
+git tag -a preview-v0.1.0-preview.1 -m "Lens 0.1.0 preview 1"
+git push origin preview-v0.1.0-preview.1
+```
+
+The tag must match `preview-vVERSION-preview.NUMBER`. The workflow builds and smoke-tests all four targets, verifies the reproducible Linux build, emits checksums, keyless Sigstore bundles, and GitHub attestations, then publishes a GitHub prerelease automatically. Windows and macOS preview binaries remain unsigned and the release body states that limitation.
+
+After publication, execute the exact Windows and Unix commands from [the installation guide](INSTALL.md) on clean machines without Rust, Cargo, GitHub CLI, or a GitHub login. Preview tags are immutable; publish a higher preview number to correct a broken preview.
+
 ## Preflight
 
 1. Confirm main is green in CI, Hardening, Fuzz smoke, and Docs.

@@ -50,6 +50,10 @@ def arguments() -> argparse.Namespace:
         type=Path,
         help="directory containing archives, checksums, and Sigstore bundles",
     )
+    parser.add_argument(
+        "--artifact-version",
+        help="archive version to validate when it differs from the workspace version",
+    )
     return parser.parse_args()
 
 
@@ -68,6 +72,12 @@ def workspace_version(root: Path) -> str:
 
 def archive_name(version: str, target: str) -> str:
     return f"lens-{version}-{target}.{TARGETS[target]}"
+
+
+def validate_artifact_version(version: str) -> str:
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-preview\.[0-9]+)?", version):
+        raise GateError(f"invalid artifact version: {version}")
+    return version
 
 
 def validate_source(root: Path, version: str) -> None:
@@ -233,7 +243,8 @@ def main() -> None:
         read_reports(options.reports, version)
         print("four-platform dogfood quorum passed")
     if options.artifacts:
-        validate_artifacts(options.artifacts, version)
+        artifact_version = validate_artifact_version(options.artifact_version or version)
+        validate_artifacts(options.artifacts, artifact_version)
         print("release artifact set passed")
 
 

@@ -4,6 +4,7 @@ param(
     [string]$InstallDirectory,
     [string]$Repository = "dpsyfk/lens",
     [string]$ReleaseMetadataPath,
+    [switch]$Preview,
     [switch]$SkipSignatureCheck,
     [switch]$SkipCommandCheck,
     [switch]$NoPathUpdate
@@ -88,28 +89,51 @@ if ($ReleaseMetadataPath) {
     $release = Get-Content -LiteralPath $ReleaseMetadataPath -Raw | ConvertFrom-Json
 } else {
     $apiRoot = "https://api.github.com/repos/$Repository/releases"
-    if ([string]::IsNullOrWhiteSpace($Version)) {
+    if ($Preview -and [string]::IsNullOrWhiteSpace($Version)) {
+        $releaseUri = "${apiRoot}?per_page=50"
+    } elseif ([string]::IsNullOrWhiteSpace($Version)) {
         $releaseUri = "$apiRoot/latest"
     } else {
-        $tag = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
+        $tag = if ($Preview) {
+            if ($Version.StartsWith("preview-v")) { $Version } else { "preview-v$Version" }
+        } else {
+            if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
+        }
         $releaseUri = "$apiRoot/tags/$([Uri]::EscapeDataString($tag))"
     }
 
     try {
-        $release = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri $releaseUri
+        $response = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri $releaseUri
     } catch {
-        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+        $responseProperty = $_.Exception.PSObject.Properties["Response"]
+        if ($responseProperty -and $responseProperty.Value -and [int]$responseProperty.Value.StatusCode -eq 404) {
             throw "No published Lens release was found. Check https://github.com/$Repository/releases and try again after a release is published."
         }
         throw
+    }
+
+    if ($Preview -and [string]::IsNullOrWhiteSpace($Version)) {
+        $matchingReleases = @($response | Where-Object {
+                -not $_.draft -and $_.prerelease -and $_.tag_name -match '^preview-v\d+\.\d+\.\d+-preview\.\d+$'
+            } | Select-Object -First 1)
+        if ($matchingReleases.Count -eq 0) {
+            throw "No published Lens preview was found. Check https://github.com/$Repository/releases."
+        }
+        $release = $matchingReleases[0]
+    } else {
+        $release = $response
     }
 }
 
 if ($release.draft) {
     throw "Refusing to install from a draft release."
 }
-if ($release.prerelease -and [string]::IsNullOrWhiteSpace($Version)) {
-    throw "The latest release is a prerelease; request its exact version explicitly."
+if ($Preview) {
+    if (-not $release.prerelease -or $release.tag_name -notmatch '^preview-v\d+\.\d+\.\d+-preview\.\d+$') {
+        throw "Preview installation requires a published preview-vVERSION-preview.NUMBER prerelease."
+    }
+} elseif ($release.prerelease) {
+    throw "Stable installation refuses prerelease artifacts; use -Preview explicitly."
 }
 
 $archivePattern = '^lens-.+-x86_64-pc-windows-msvc\.zip$'
@@ -161,7 +185,9 @@ try {
     }
     $sourceBinary = $binaries[0].FullName
 
-    if (-not $SkipSignatureCheck) {
+    if ($Preview) {
+        Write-Warning "Installing unsigned Lens development preview '$($release.tag_name)'. Use it only on a development machine."
+    } elseif (-not $SkipSignatureCheck) {
         $signature = Get-AuthenticodeSignature -FilePath $sourceBinary
         if ($signature.Status -ne "Valid") {
             throw "Authenticode verification failed: $($signature.Status) - $($signature.StatusMessage)"
