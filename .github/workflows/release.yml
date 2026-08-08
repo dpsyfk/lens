@@ -90,7 +90,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/preview-v* ]]; then
             version="${GITHUB_REF_NAME#preview-v}"
             preview_prefix="${crate_version}-preview."
-            preview_number="${version#${preview_prefix}}"
+            preview_number="${version#"$preview_prefix"}"
             if [[ "$version" != "${preview_prefix}${preview_number}" || ! "$preview_number" =~ ^[0-9]+$ ]]; then
               echo "::error::preview tag must match preview-v${crate_version}-preview.NUMBER"
               exit 1
