@@ -239,7 +239,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v4.1.2
       - name: Checksum and keyless-sign every archive
         shell: bash
         run: |
@@ -283,7 +283,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v4.1.2
       - name: Checksum and keyless-sign every preview archive
         shell: bash
         run: |
