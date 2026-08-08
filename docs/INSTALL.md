@@ -1,8 +1,8 @@
 # Install Lens
 
-Lens is a development preview. Public preview archives are available without a GitHub account, but Windows binaries are not Authenticode-signed and macOS binaries are not Developer ID-signed or notarized. Install them only on development machines you control.
+Lens is a free development preview. Installing it does not require a paid code-signing certificate, Rust, Cargo, a GitHub account, or administrator access. Windows binaries are not Authenticode-signed and macOS binaries are not Developer ID-signed or notarized, so the operating system may show a warning. Install Lens only on a development machine you control.
 
-Stable public installation remains blocked until the native signing credentials are configured. The signed `v*` release path and the unsigned `preview-v*` path are deliberately separate.
+The installer is downloaded as a file and does not use `iex`. It verifies the selected release archive against the release's SHA-256 manifest. Installation never changes HTTPS trust; `lens cert install` remains a separate, explicit action.
 
 ## Install the public preview
 
@@ -163,7 +163,7 @@ lens cert status
 
 ## Uninstall
 
-Remove Lens trust first if it was installed:
+Stop Lens first. If you enabled HTTPS inspection, remove Lens trust while the command is still available:
 
 ```sh
 lens cert uninstall
@@ -175,12 +175,24 @@ On Windows, close Lens and run:
 $InstallRoot = "$env:LOCALAPPDATA\Programs\Lens"
 $Bin = Join-Path $InstallRoot "bin"
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-$NewUserPath = @($UserPath -split ";" | Where-Object { $_ -and $_ -ne $Bin }) -join ";"
+$NewUserPath = @($UserPath -split ";" | Where-Object { $_ -and $_.TrimEnd("\") -ine $Bin.TrimEnd("\") }) -join ";"
 [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
-Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+$env:Path = @($env:Path -split ";" | Where-Object { $_ -and $_.TrimEnd("\") -ine $Bin.TrimEnd("\") }) -join ";"
+if (Test-Path -LiteralPath $InstallRoot) {
+  Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+}
 ```
 
-On macOS or Linux, remove `$HOME/.local/bin/lens`. Remove project proxy variables or application-specific proxy settings separately.
+On macOS or Linux:
+
+```sh
+lens cert uninstall
+rm -f "$HOME/.local/bin/lens"
+```
+
+Remove project proxy variables or application-specific proxy settings separately. These commands preserve configuration, plugins, and generated CA files so a reinstall can reuse them. `lens cert uninstall` removes operating-system trust but intentionally retains the local CA key.
+
+To remove all retained Lens data as well, first inspect and confirm the directory reported by `lens cert status`. Delete only that Lens-specific configuration directory. Plugins are stored in `%LOCALAPPDATA%\Lens\plugins` on Windows and `${XDG_DATA_HOME:-$HOME/.local/share}/lens/plugins` on macOS or Linux.
 
 ## Signed stable installation (future)
 
