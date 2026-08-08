@@ -4,7 +4,7 @@
 
 Lens is a local-first developer proxy with a live TUI. Point a development application at Lens and it forwards the traffic, decodes supported protocols, redacts common secrets, and shows each request, response, error, and latency in real time.
 
-> **Development preview:** the proxy and cross-platform build pipeline work, but no signed public release has been published. Until Windows and macOS signing credentials are funded and configured, install an unsigned GitHub Actions artifact or build from source. The future public installer is intentionally not advertised yet.
+> **Development preview:** the proxy and cross-platform build pipeline work, but the preview binaries are not Windows Authenticode-signed or Apple Developer ID-signed/notarized. Install them only on a development machine. Stable public installation remains blocked on those signing credentials.
 
 ```text
 your application  ──►  Lens  ──►  API / PostgreSQL / Redis / gRPC service
@@ -18,108 +18,50 @@ your application  ──►  Lens  ──►  API / PostgreSQL / Redis / gRPC se
 
 | Platform | Available today | Public signed install |
 | --- | --- | --- |
-| Windows x64 | Unsigned GitHub Actions artifact or source build | Not published yet |
-| macOS Apple silicon / Intel | Unsigned GitHub Actions artifact or source build | Not published yet |
-| Linux x64 | Unsigned GitHub Actions artifact or source build | Not published yet |
+| Windows x64 | Public unsigned preview or source build | Not published yet |
+| macOS Apple silicon / Intel | Public unsigned preview or source build | Not published yet |
+| Linux x64 | Public unsigned preview or source build | Not published yet |
 
-The preview artifacts require a GitHub account, expire after 14 days, and are intended for evaluation on development machines. See the complete [cross-platform installation guide](docs/INSTALL.md) for macOS, Linux, source builds, updates, and removal.
-
-### GitHub Codespaces / Linux x64
-
-Prerequisites: a Linux shell and the [GitHub CLI](https://cli.github.com/) authenticated with `gh auth status`.
-
-Copy this block into the Codespaces or Linux terminal. Do not use the Windows PowerShell block in Codespaces.
-
-```sh
-mkdir -p "$HOME/.local/bin"
-
-RUN_ID="$(gh run list \
-  --repo dpsyfk/lens \
-  --workflow release.yml \
-  --status success \
-  --limit 1 \
-  --json databaseId \
-  --jq '.[0].databaseId')"
-
-test -n "$RUN_ID" || { echo "No successful Lens release workflow was found." >&2; exit 1; }
-
-ARTIFACT_DIR="${TMPDIR:-/tmp}/lens-$RUN_ID-linux-x64"
-rm -rf "$ARTIFACT_DIR"
-mkdir -p "$ARTIFACT_DIR"
-
-gh run download "$RUN_ID" \
-  --repo dpsyfk/lens \
-  --name lens-x86_64-unknown-linux-gnu \
-  --dir "$ARTIFACT_DIR"
-
-tar -xzf "$ARTIFACT_DIR"/*.tar.gz -C "$ARTIFACT_DIR"
-LENS_BIN="$(find "$ARTIFACT_DIR" -type f -name lens | head -n 1)"
-test -n "$LENS_BIN" || { echo "lens binary was not found in the downloaded artifact." >&2; exit 1; }
-
-install -m 0755 "$LENS_BIN" "$HOME/.local/bin/lens"
-export PATH="$HOME/.local/bin:$PATH"
-
-lens --version
-lens doctor --check all
-```
+Preview installation does not require Rust, Cargo, the GitHub CLI, or a GitHub account. The installers select the newest published Lens prerelease and verify its archive against the published SHA-256 manifest. See the complete [cross-platform installation guide](docs/INSTALL.md) for source builds, updates, removal, and the authenticated Actions-artifact fallback.
 
 ### Windows x64
 
-Prerequisites: PowerShell and the [GitHub CLI](https://cli.github.com/) authenticated with `gh auth status`.
-
-Copy this block into Windows PowerShell only. It downloads the latest successful Windows preview, installs `lens.exe` under your user profile, and adds `lens` to your user `PATH`:
+Download the installer before running it so it can be inspected. The explicit `-Preview` flag is required because the binary is unsigned:
 
 ```powershell
-$InstallRoot = "$env:LOCALAPPDATA\Programs\Lens"
-$Bin = Join-Path $InstallRoot "bin"
-
-$RunId = gh run list `
-  --repo dpsyfk/lens `
-  --workflow release.yml `
-  --status success `
-  --limit 1 `
-  --json databaseId `
-  --jq '.[0].databaseId'
-
-if (-not $RunId) { throw "No successful Lens release workflow was found." }
-
-$ArtifactDir = Join-Path $InstallRoot "_artifact\$RunId-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Force -Path $Bin, $ArtifactDir | Out-Null
-
-gh run download $RunId `
-  --repo dpsyfk/lens `
-  --name lens-x86_64-pc-windows-msvc `
-  --dir $ArtifactDir
-
-if ($LASTEXITCODE -ne 0) { throw "Lens artifact download failed." }
-
-$Bundle = Get-ChildItem -LiteralPath $ArtifactDir -Filter "*.zip" | Select-Object -First 1
-if (-not $Bundle) { throw "Lens ZIP bundle was not found in the downloaded artifact." }
-Expand-Archive -LiteralPath $Bundle.FullName -DestinationPath $ArtifactDir -Force
-
-$LensExe = Get-ChildItem $ArtifactDir -Recurse -Filter lens.exe | Select-Object -First 1
-if (-not $LensExe) { throw "lens.exe was not found in the downloaded artifact." }
-
-$Destination = Join-Path $Bin "lens.exe"
-if (Test-Path -LiteralPath $Destination) {
-  Copy-Item -LiteralPath $Destination -Destination "$Destination.previous" -Force
+$Installer = Join-Path $env:TEMP "lens-install.ps1"
+Invoke-WebRequest https://raw.githubusercontent.com/dpsyfk/lens/main/install.ps1 -OutFile $Installer
+try {
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Installer -Preview
+  if ($LASTEXITCODE -ne 0) { throw "Lens preview installation failed." }
+} finally {
+  Remove-Item -LiteralPath $Installer -ErrorAction SilentlyContinue
 }
-Copy-Item $LensExe.FullName $Destination -Force
-Remove-Item -LiteralPath $ArtifactDir -Recurse -Force
+```
 
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-$PathEntries = @($UserPath -split ";" | Where-Object { $_ })
-if ($PathEntries -notcontains $Bin) {
-  $NewUserPath = (@($PathEntries) + $Bin) -join ";"
-  [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
-}
-$env:Path = "$Bin;$env:Path"
+Open a new PowerShell window, then verify:
 
+```powershell
 lens --version
 lens doctor --check all
 ```
 
-After installation, `lens` works from any new PowerShell or terminal window. Windows may warn because this development artifact is not Authenticode-signed; do not redistribute it as a production release.
+### GitHub Codespaces / Linux x64 / macOS
+
+Download and run the portable preview installer:
+
+```sh
+installer="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/dpsyfk/lens/main/install-preview.sh -o "$installer"
+sh "$installer"
+rm -f "$installer"
+
+export PATH="$HOME/.local/bin:$PATH"
+lens --version
+lens doctor --check all
+```
+
+The Unix installer supports Linux x64, macOS Apple silicon, and macOS Intel. Add `$HOME/.local/bin` to the shell profile to make `lens` available in future terminals. Windows or macOS may warn because the development preview is unsigned; do not redistribute it as a production release.
 
 ## See your first request
 

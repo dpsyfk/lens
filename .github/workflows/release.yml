@@ -9,7 +9,9 @@ on:
       - "docs/INSTALL.md"
       - "docs/UPGRADING.md"
       - "install.ps1"
+      - "install-preview.sh"
       - "scripts/test-install.ps1"
+      - "scripts/test-install-preview.sh"
       - "scripts/package-release.py"
       - "scripts/release-smoke.py"
       - "scripts/verify-release.py"
@@ -21,7 +23,7 @@ on:
       - "docs/DOGFOOD-REPORT.example.json"
       - ".github/workflows/release.yml"
   push:
-    tags: ["v*"]
+    tags: ["v*", "preview-v*"]
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
@@ -85,7 +87,15 @@ jobs:
         run: |
           echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
           crate_version="$(python scripts/check-versions.py)"
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/preview-v* ]]; then
+            version="${GITHUB_REF_NAME#preview-v}"
+            preview_prefix="${crate_version}-preview."
+            preview_number="${version#"$preview_prefix"}"
+            if [[ "$version" != "${preview_prefix}${preview_number}" || ! "$preview_number" =~ ^[0-9]+$ ]]; then
+              echo "::error::preview tag must match preview-v${crate_version}-preview.NUMBER"
+              exit 1
+            fi
+          elif [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             version="${GITHUB_REF_NAME#v}"
             if [[ "$version" != "$crate_version" ]]; then
               echo "::error::tag $GITHUB_REF_NAME does not match lens-cli version $crate_version"
@@ -257,4 +267,56 @@ jobs:
           draft: true
           generate_release_notes: true
           fail_on_unmatched_files: true
+          files: dist/*
+
+  publish-preview:
+    if: startsWith(github.ref, 'refs/tags/preview-v')
+    needs: [build, reproducible-linux-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: sigstore/cosign-installer@v4
+      - name: Checksum and keyless-sign every preview archive
+        shell: bash
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          for artifact in lens-* SHA256SUMS; do
+            cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
+            cosign verify-blob \
+              --bundle "${artifact}.sigstore.json" \
+              --certificate-identity "https://github.com/$GITHUB_WORKFLOW_REF" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "$artifact"
+          done
+      - name: Require the exact complete preview artifact set
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#preview-v}"
+          python scripts/release_gate.py --artifacts dist --artifact-version "$version"
+      - name: Attest preview archives and checksum manifest
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          prerelease: true
+          draft: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## Unsigned development preview
+
+            These binaries are for evaluation on development machines. Windows binaries are not Authenticode-signed and macOS binaries are not Developer ID-signed or notarized. Verify the supplied SHA-256 checksum before installation.
           files: dist/*

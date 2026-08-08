@@ -50,9 +50,20 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Test one-line installer behavior
+      - name: Test Windows installer behavior
         shell: pwsh
         run: ./scripts/test-install.ps1
+
+  unix-preview-installer:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test unsigned preview installer behavior
+        run: sh ./scripts/test-install-preview.sh
 
   format:
     runs-on: ubuntu-latest

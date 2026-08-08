@@ -97,6 +97,15 @@ class ReleaseGateTests(unittest.TestCase):
             with self.assertRaises(release_gate.GateError):
                 release_gate.validate_lockfile(path)
 
+    def test_preview_artifact_versions_are_explicit_and_bounded(self) -> None:
+        self.assertEqual(
+            release_gate.validate_artifact_version("0.1.0-preview.3"),
+            "0.1.0-preview.3",
+        )
+        for invalid in ("preview-v0.1.0", "0.1.0-preview.latest", "0.1.0/dev"):
+            with self.subTest(invalid=invalid), self.assertRaises(release_gate.GateError):
+                release_gate.validate_artifact_version(invalid)
+
 
 if __name__ == "__main__":
     unittest.main()

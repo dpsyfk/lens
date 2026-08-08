@@ -46,6 +46,52 @@ try {
         throw "installer did not add Lens to the current process PATH"
     }
 
+    $previewRejectedStable = $false
+    try {
+        & (Join-Path $repositoryRoot "install.ps1") `
+            -ReleaseMetadataPath $metadataPath `
+            -InstallDirectory $installDirectory `
+            -Preview `
+            -SkipCommandCheck `
+            -NoPathUpdate
+    } catch {
+        $previewRejectedStable = $_.Exception.Message -match "Preview installation requires"
+    }
+    if (-not $previewRejectedStable) {
+        throw "preview mode accepted a stable release"
+    }
+
+    $previewMetadata = @{
+        tag_name = "preview-v0.1.0-preview.1"
+        draft = $false
+        prerelease = $true
+        assets = $metadata.assets
+    }
+    $previewMetadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metadataPath -Encoding utf8
+
+    $stableRejectedPreview = $false
+    try {
+        & (Join-Path $repositoryRoot "install.ps1") `
+            -ReleaseMetadataPath $metadataPath `
+            -InstallDirectory $installDirectory `
+            -SkipCommandCheck `
+            -NoPathUpdate
+    } catch {
+        $stableRejectedPreview = $_.Exception.Message -match "Stable installation refuses prerelease"
+    }
+    if (-not $stableRejectedPreview) {
+        throw "stable mode accepted an unsigned preview release"
+    }
+
+    & (Join-Path $repositoryRoot "install.ps1") `
+        -ReleaseMetadataPath $metadataPath `
+        -InstallDirectory $installDirectory `
+        -Preview `
+        -SkipCommandCheck `
+        -NoPathUpdate
+
+    $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metadataPath -Encoding utf8
+
     & (Join-Path $repositoryRoot "install.ps1") `
         -ReleaseMetadataPath $metadataPath `
         -InstallDirectory $installDirectory `
