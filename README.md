@@ -4,7 +4,7 @@
 
 Lens is a local-first developer proxy with a live TUI. Point a development application at Lens and it forwards the traffic, decodes supported protocols, redacts common secrets, and shows each request, response, error, and latency in real time.
 
-> **Development preview:** the proxy and cross-platform build pipeline work, but the preview binaries are not Windows Authenticode-signed or Apple Developer ID-signed/notarized. Install them only on a development machine. Stable public installation remains blocked on those signing credentials.
+> **Free development preview:** no paid code-signing certificate, Rust toolchain, GitHub account, or administrator access is required. The binaries are unsigned, so Windows or macOS may show a warning. Install Lens only on a development machine you control.
 
 ```text
 your application  ──►  Lens  ──►  API / PostgreSQL / Redis / gRPC service
@@ -14,15 +14,15 @@ your application  ──►  Lens  ──►  API / PostgreSQL / Redis / gRPC se
 
 [Install](docs/INSTALL.md) · [Quickstart](docs/src/quickstart.md) · [Troubleshooting](docs/src/troubleshooting.md) · [Architecture](ARCHITECTURE.md) · [Security](SECURITY_REVIEW.md)
 
-## Install the development preview
+## Install Lens
 
-| Platform | Available today | Public signed install |
-| --- | --- | --- |
-| Windows x64 | Public unsigned preview or source build | Not published yet |
-| macOS Apple silicon / Intel | Public unsigned preview or source build | Not published yet |
-| Linux x64 | Public unsigned preview or source build | Not published yet |
+| Platform | Free install available |
+| --- | --- |
+| Windows x64 | Unsigned development preview |
+| macOS Apple silicon / Intel | Unsigned development preview |
+| Linux x64 | Unsigned development preview |
 
-Preview installation does not require Rust, Cargo, the GitHub CLI, or a GitHub account. The installers select the newest published Lens prerelease and verify its archive against the published SHA-256 manifest. See the complete [cross-platform installation guide](docs/INSTALL.md) for source builds, updates, removal, and the authenticated Actions-artifact fallback.
+The installer downloads the newest published Lens preview and verifies its archive against the published SHA-256 manifest. It does not use `iex` and does not install Lens's HTTPS certificate authority. HTTPS trust remains a separate, explicit `lens cert install` action. See the complete [cross-platform installation guide](docs/INSTALL.md) for source builds, updates, and removal.
 
 ### Windows x64
 
@@ -61,7 +61,38 @@ lens --version
 lens doctor --check all
 ```
 
-The Unix installer supports Linux x64, macOS Apple silicon, and macOS Intel. Add `$HOME/.local/bin` to the shell profile to make `lens` available in future terminals. Windows or macOS may warn because the development preview is unsigned; do not redistribute it as a production release.
+The Unix installer supports Linux x64, macOS Apple silicon, and macOS Intel. Add `$HOME/.local/bin` to the shell profile to make `lens` available in future terminals. Windows or macOS may warn because the development preview is unsigned.
+
+## Uninstall Lens
+
+Stop Lens first. If you enabled HTTPS inspection, remove its user-scoped trust before deleting the executable:
+
+```powershell
+lens cert uninstall
+```
+
+On Windows, run this in PowerShell:
+
+```powershell
+$InstallRoot = Join-Path $env:LOCALAPPDATA "Programs\Lens"
+$Bin = Join-Path $InstallRoot "bin"
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$NewUserPath = @($UserPath -split ";" | Where-Object { $_ -and $_.TrimEnd("\") -ine $Bin.TrimEnd("\") }) -join ";"
+[Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+$env:Path = @($env:Path -split ";" | Where-Object { $_ -and $_.TrimEnd("\") -ine $Bin.TrimEnd("\") }) -join ";"
+if (Test-Path -LiteralPath $InstallRoot) {
+  Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+}
+```
+
+On macOS or Linux:
+
+```sh
+lens cert uninstall
+rm -f "$HOME/.local/bin/lens"
+```
+
+These commands remove the executable and Windows `PATH` entry but preserve Lens configuration, plugins, and local CA files for a later reinstall. See [complete removal options](docs/INSTALL.md#uninstall) if you also want to purge retained data.
 
 ## See your first request
 
@@ -204,7 +235,7 @@ The executable is `target/release/lens` (`target\release\lens.exe` on Windows). 
 - Windows transparent TCP mode requires the separate first-party WFP driver, elevation, and production driver signing before general distribution.
 - Linux nftables and macOS PF transparent adapters are not delivered.
 - Transparent HTTPS remains encrypted; use the explicit `HTTPS_PROXY` path for inspection.
-- Publicly downloadable signed binaries, package-manager distribution, and the public installer are deferred until release signing is available.
+- Signed stable binaries and package-manager distribution are deferred. The free unsigned preview installer remains available for development use.
 
 ## Documentation
 
