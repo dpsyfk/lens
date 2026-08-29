@@ -1,4 +1,4 @@
-# Lens
+#                                                                                                                                                                                    Lens
 
 **See what your application sends to APIs and databases without leaving the terminal.**
 
