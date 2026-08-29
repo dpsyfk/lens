@@ -1,6 +1,5 @@
 #Lens
-
-https://img.shields.io/badge/Lens-_-brightgreen
+![Static Badge](https://img.shields.io/badge/Lens-_-brightgreen)
 
 
 **See what your application sends to APIs and databases without leaving the terminal.**
