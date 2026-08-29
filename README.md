@@ -1,8 +1,18 @@
-Lens
+<div align="center">
 
-![Static Badge](https://img.shields.io/badge/Lens-_-brightgreen)
+<h1>LENS</h1>
 
+<p><strong>See what your application sends to APIs and databases without leaving the terminal.</strong></p>
 
+<p>
+  <a href="https://github.com/dpsyfk/lens/actions"><img src="https://img.shields.io/github/actions/workflow/status/dpsyfk/lens/ci.yml?branch=main&style=for-the-badge" alt="Build Status" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/LICENSE"><img src="https://img.shields.io/github/license/dpsyfk/lens?style=for-the-badge" alt="License" /></a>
+  <a href="https://github.com/dpsyfk/lens/stargazers"><img src="https://img.shields.io/github/stars/dpsyfk/lens?style=for-the-badge" alt="Stars" /></a>
+  <a href="https://github.com/dpsyfk/lens/network/members"><img src="https://img.shields.io/github/forks/dpsyfk/lens?style=for-the-badge" alt="Forks" /></a>
+  <a href="https://github.com/dpsyfk/lens/issues"><img src="https://img.shields.io/github/issues/dpsyfk/lens?style=for-the-badge" alt="Issues" /></a>
+</p>
+
+</div>
 **See what your application sends to APIs and databases without leaving the terminal.**
 
 Lens is a local-first developer proxy with a live TUI. Point a development application at Lens and it forwards the traffic, decodes supported protocols, redacts common secrets, and shows each request, response, error, and latency in real time.
