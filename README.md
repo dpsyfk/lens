@@ -10,6 +10,21 @@
   <a href="https://github.com/dpsyfk/lens/stargazers"><img src="https://img.shields.io/github/stars/dpsyfk/lens?style=for-the-badge" alt="Stars" /></a>
   <a href="https://github.com/dpsyfk/lens/network/members"><img src="https://img.shields.io/github/forks/dpsyfk/lens?style=for-the-badge" alt="Forks" /></a>
   <a href="https://github.com/dpsyfk/lens/issues"><img src="https://img.shields.io/github/issues/dpsyfk/lens?style=for-the-badge" alt="Issues" /></a>
+  <a href="https://github.com/dpsyfk/lens/pulls"><img src="https://img.shields.io/github/issues-pr/dpsyfk/lens?style=for-the-badge" alt="Pull Requests" /></a>
+  <a href="https://github.com/dpsyfk/lens/commits/main"><img src="https://img.shields.io/github/last-commit/dpsyfk/lens?style=for-the-badge" alt="Last Commit" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/Rust-1.78%2B-orange?style=for-the-badge&logo=rust" alt="Rust" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/Cargo.toml"><img src="https://img.shields.io/badge/Edition-2021-blue?style=for-the-badge&logo=rust" alt="Rust Edition" /></a>
+  <a href="https://github.com/dpsyfk/lens/releases"><img src="https://img.shields.io/github/v/release/dpsyfk/lens?include_prereleases&style=for-the-badge" alt="Latest Release" /></a>
+  <a href="https://github.com/dpsyfk/lens/releases"><img src="https://img.shields.io/github/release-date-pre/dpsyfk/lens?style=for-the-badge" alt="Release Date" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/docs/INSTALL.md"><img src="https://img.shields.io/badge/docs-installation-informational?style=for-the-badge&logo=readthedocs" alt="Install Docs" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/docs/src/quickstart.md"><img src="https://img.shields.io/badge/docs-quickstart-success?style=for-the-badge&logo=bookstack" alt="Quickstart Docs" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/docs/src/troubleshooting.md"><img src="https://img.shields.io/badge/docs-troubleshooting-important?style=for-the-badge&logo=lifehacker" alt="Troubleshooting Docs" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/docs/src/plugins.md"><img src="https://img.shields.io/badge/plugins-WASM%20ABI--v1-purple?style=for-the-badge&logo=webassembly" alt="Plugins" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/docs/src/linux-discovery.md"><img src="https://img.shields.io/badge/linux-eBPF%20discovery-black?style=for-the-badge&logo=linux" alt="Linux Discovery" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/SECURITY_REVIEW.md"><img src="https://img.shields.io/badge/security-reviewed-2ea44f?style=for-the-badge&logo=securityscorecard" alt="Security Reviewed" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/ARCHITECTURE.md"><img src="https://img.shields.io/badge/architecture-documented-007ec6?style=for-the-badge&logo=github" alt="Architecture" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-welcome-brightgreen?style=for-the-badge&logo=github" alt="Contributions Welcome" /></a>
+  <a href="https://github.com/dpsyfk/lens/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=for-the-badge&logo=apache" alt="Apache 2.0 License" /></a>
 </p>
 
 </div>
