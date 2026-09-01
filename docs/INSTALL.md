@@ -12,7 +12,23 @@ The preview installers:
 - download the platform archive and `SHA256SUMS` from the same immutable release;
 - reject missing, duplicate, or mismatched checksums;
 - verify that the extracted binary runs before installing it;
-- install into a user-owned directory without Rust, Cargo, GitHub CLI, or administrator access.
+- install into a user-owned directory without Rust, Cargo, GitHub CLI, or administrator
+access.
+
+### macOS
+
+The same installer detects Apple silicon and Intel machines:
+
+```sh
+installer="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/dpsyfk/lens/main/install-preview.sh -o "$installer"
+sh "$installer"
+rm -f "$installer"
+
+export PATH="$HOME/.local/bin:$PATH"
+lens --version
+lens doctor --check all
+```
 
 ### Windows x64
 
@@ -57,20 +73,6 @@ lens doctor --check all
 
 Add `$HOME/.local/bin` to the shell profile if it is not already on `PATH`.
 
-### macOS
-
-The same installer detects Apple silicon and Intel machines:
-
-```sh
-installer="$(mktemp)"
-curl -fsSL https://raw.githubusercontent.com/dpsyfk/lens/main/install-preview.sh -o "$installer"
-sh "$installer"
-rm -f "$installer"
-
-export PATH="$HOME/.local/bin:$PATH"
-lens --version
-lens doctor --check all
-```
 
 macOS may block the unsigned preview. Use it only if you intentionally downloaded it from the Lens repository. A normal stable release will require Developer ID signing and notarization instead of asking users to normalize this warning.
 
